@@ -58,6 +58,33 @@ final class PortReceiver implements Receiver {
         clientSessionManager = ScUtil.createClientSessionManager(config,
                 clientSessionService.buildClientSessionLifecycle(), buildClientBytesSender());
         buildSendThread().start();
+
+        //心跳检测
+        if (config.heartbeatPeriod > 0) {
+            Thread.startVirtualThread(() -> {
+                try {
+                    Thread.sleep(config.heartbeatPeriod / 3);
+                } catch (InterruptedException ignored) {
+                }
+                while (running) {
+                    //发送心跳包
+                    sendCommandQueue.add(Constant.SsCommands.Heartbeat + ":" + System.currentTimeMillis());
+                    //检测服务端心跳回复
+                    if (System.currentTimeMillis() - serverHeartbeatTime > config.heartbeatPeriod * 1.5) {
+                        log.warn("长期未收到服务端心跳，疑似故障，重启");
+                        clientSessionService.exit();
+                        break;
+                    }
+                    log.info("心跳检测正常");
+                    try {
+                        Thread.sleep(config.heartbeatPeriod);
+                    } catch (InterruptedException ignored) {
+                    }
+                }
+            });
+
+        }
+
         clientSessionService.connectToServer(config, (exceptionCb) -> {
             if (null != exceptionCb) {
                 log.warn("建立连接异常");
@@ -92,33 +119,6 @@ final class PortReceiver implements Receiver {
                 sendLoginCommand();
                 checkSessionInit();
             });
-
-            //心跳检测
-            if (config.heartbeatPeriod > 0) {
-                Thread.startVirtualThread(() -> {
-                    try {
-                        Thread.sleep(config.heartbeatPeriod / 3);
-                    } catch (InterruptedException e) {
-                    }
-                    while (running) {
-                        //发送心跳包
-                        sendCommandQueue.add(Constant.SsCommands.Heartbeat + ":" + System.currentTimeMillis());
-                        //检测服务端心跳回复
-                        if (System.currentTimeMillis() - serverHeartbeatTime > config.heartbeatPeriod * 1.5) {
-                            log.warn("长期未收到服务端心跳，疑似故障，重启");
-                            clientSessionService.exit();
-                        }
-                        log.info("心跳检测正常");
-                        try {
-                            Thread.sleep(config.heartbeatPeriod);
-                        } catch (InterruptedException e) {
-                            continue;
-                        }
-                    }
-                });
-
-            }
-
         });
     }
 

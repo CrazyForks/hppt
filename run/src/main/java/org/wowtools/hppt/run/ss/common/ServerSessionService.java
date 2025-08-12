@@ -17,7 +17,7 @@ public abstract class ServerSessionService<CTX> {
     private final Receiver<CTX> receiver;
 
 
-    protected boolean running = false;
+    protected boolean running = true;
 
     /**
      * @param ssConfig 配置信息
@@ -31,7 +31,21 @@ public abstract class ServerSessionService<CTX> {
             receiver = new SsReceiver<>(ssConfig.relayScConfig, this);
             log.info("--- 中继模式");
         }
+    }
 
+    /**
+     * 启动服务 同步阻塞直到发生异常退出
+     *
+     * @param ssConfig 配置信息
+     */
+    public void syncStart(SsConfig ssConfig) {
+        log.info("syncStart {}", this);
+        try {
+            init(ssConfig);
+        } catch (Exception e) {
+            log.warn("初始化失败 {}", this, e);
+            exit("init err");
+        }
         //起一个线程，定期检查服务心跳
         if (ssConfig.heartbeatTimeout > 0) {
             Thread.startVirtualThread(() -> {
@@ -48,30 +62,12 @@ public abstract class ServerSessionService<CTX> {
                         } catch (InterruptedException ignored) {
                         }
                     } else {
-                        break;
+                        log.warn("服务端心跳监测超时，执行重启");
+                        exit("服务端心跳监测失败");
+                        return;
                     }
-
                 }
-                log.warn("服务端心跳监测超时，执行重启");
-                exit("心跳监测失败");
             });
-        }
-
-    }
-
-    /**
-     * 启动服务 同步阻塞直到发生异常退出
-     *
-     * @param ssConfig 配置信息
-     */
-    public void syncStart(SsConfig ssConfig) {
-        log.info("syncStart {}", this);
-        running = true;
-        try {
-            init(ssConfig);
-        } catch (Exception e) {
-            log.warn("初始化失败 {}", this, e);
-            exit("init err");
         }
         log.info("-------syncStart end {}", this);
         while (running) {
@@ -136,13 +132,13 @@ public abstract class ServerSessionService<CTX> {
      */
     public void exit(String type) {
         log.warn("ServerSessionService exit,type [{}] service {}", type, this);
+        running = false;
         receiver.exit();
         try {
             onExit();
         } catch (Exception e) {
             log.warn("doClose error ", e);
         }
-        running = false;
     }
 
 

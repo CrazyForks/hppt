@@ -12,6 +12,8 @@ import org.wowtools.hppt.common.util.NettyObjectBuilder;
 import org.wowtools.hppt.run.ss.common.ServerSessionService;
 import org.wowtools.hppt.run.ss.pojo.SsConfig;
 
+import java.util.concurrent.TimeUnit;
+
 /**
  * @author liuyu
  * @date 2024/4/15
@@ -87,7 +89,7 @@ public class RHpptServerSessionService extends ServerSessionService<ChannelHandl
 
     @Override
     public void onExit() throws Exception {
-        Object c = group.shutdownGracefully().sync().get();
+        Object c = group.shutdownGracefully().awaitUninterruptibly(2, TimeUnit.SECONDS);
         log.info("onExit end {}", c);
     }
 }
