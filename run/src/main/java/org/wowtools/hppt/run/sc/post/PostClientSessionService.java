@@ -16,6 +16,8 @@ import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @author liuyu
@@ -97,8 +99,8 @@ public class PostClientSessionService extends ClientSessionService {
         });
     }
 
-    private final Object replyThreadEmptyLock = new Object();
-    private volatile boolean replyThreadEmptySleep = false;
+    private final ReentrantLock replyLock = new ReentrantLock();
+    private final Condition replyCondition = replyLock.newCondition();
 
     private void startReplyThread() {
         Thread.startVirtualThread(() -> {
@@ -115,14 +117,17 @@ public class PostClientSessionService extends ClientSessionService {
                 //检测是否需要挂起接收线程
                 if (empty && notUsed()) {
                     log.info("无客户端,挂起接收线程");
-                    do {
-                        synchronized (replyThreadEmptyLock) {
+                    replyLock.lock();
+                    try {
+                        while (notUsed() && running) {
                             try {
-                                replyThreadEmptyLock.wait(10_000);
+                                replyCondition.await(10, TimeUnit.SECONDS);
                             } catch (Exception e) {
                             }
                         }
-                    } while (notUsed() && replyThreadEmptySleep && running);
+                    } finally {
+                        replyLock.unlock();
+                    }
                     log.info("唤醒接收线程");
                     if (!running) {
                         log.info("退出已停止ReplyThread");
@@ -187,18 +192,22 @@ public class PostClientSessionService extends ClientSessionService {
 
     @Override
     protected void newConnected() {
-        synchronized (replyThreadEmptyLock) {
-            replyThreadEmptyLock.notify();
+        replyLock.lock();
+        try {
+            replyCondition.signal();
+        } finally {
+            replyLock.unlock();
         }
     }
 
     @Override
     public void exit() {
         super.exit();
-        Thread.startVirtualThread(() -> {
-            synchronized (replyThreadEmptyLock) {
-                replyThreadEmptyLock.notify();
-            }
-        });
+        replyLock.lock();
+        try {
+            replyCondition.signal();
+        } finally {
+            replyLock.unlock();
+        }
     }
 }

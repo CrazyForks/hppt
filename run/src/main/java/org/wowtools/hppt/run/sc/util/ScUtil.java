@@ -1,12 +1,10 @@
 package org.wowtools.hppt.run.sc.util;
 
-import io.netty.util.internal.StringUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.client.ClientBytesSender;
 import org.wowtools.hppt.common.client.ClientSessionLifecycle;
 import org.wowtools.hppt.common.client.ClientSessionManager;
 import org.wowtools.hppt.common.client.ClientSessionManagerBuilder;
-import org.wowtools.hppt.common.util.NettyObjectBuilder;
 import org.wowtools.hppt.run.sc.pojo.ScConfig;
 
 /**
@@ -22,16 +20,15 @@ public class ScUtil {
         ClientSessionManager clientSessionManager = new ClientSessionManagerBuilder()
                 .setBufferSize(config.maxSendBodySize * 2)
                 .setLifecycle(lifecycle)
-                .setWorkerGroup(NettyObjectBuilder.buildEventLoopGroup(config.workerGroupNum))
                 .setClientBytesSender(clientBytesSender)
                 .build();
         if (null != config.forwards) {
             for (ScConfig.Forward forward : config.forwards) {
                 String localHost = forward.localHost;
-                if (StringUtil.isNullOrEmpty(localHost)) {
+                if (localHost == null || localHost.isEmpty()) {
                     localHost = config.localHost;
                 }
-                if (StringUtil.isNullOrEmpty(localHost)) {
+                if (localHost == null || localHost.isEmpty()) {
                     localHost = null;
                 }
 

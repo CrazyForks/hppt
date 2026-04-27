@@ -1,27 +1,26 @@
 package org.wowtools.hppt.run.ss.websocket;
 
-import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.*;
-import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.handler.codec.http.HttpObjectAggregator;
-import io.netty.handler.codec.http.HttpServerCodec;
-import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
-import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
-import io.netty.handler.stream.ChunkedWriteHandler;
 import lombok.extern.slf4j.Slf4j;
-import org.wowtools.hppt.common.util.BytesUtil;
-import org.wowtools.hppt.common.util.NettyObjectBuilder;
+import org.java_websocket.WebSocket;
+import org.java_websocket.handshake.ClientHandshake;
+import org.java_websocket.server.WebSocketServer;
 import org.wowtools.hppt.run.ss.common.ServerSessionService;
 import org.wowtools.hppt.run.ss.pojo.SsConfig;
 
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+
 /**
+ * WebSocket协议服务端 - Java-WebSocket实现
+ * SS监听端口，接受SC的WebSocket连接，使用二进制帧传输数据
+ *
  * @author liuyu
  * @date 2024/2/7
  */
 @Slf4j
-public class WebsocketServerSessionService extends ServerSessionService<ChannelHandlerContext> {
-    private EventLoopGroup boss;
-    private EventLoopGroup worker;
+public class WebsocketServerSessionService extends ServerSessionService<WebSocket> {
+
+    private WebSocketServer server;
 
     public WebsocketServerSessionService(SsConfig ssConfig) throws Exception {
         super(ssConfig);
@@ -29,77 +28,77 @@ public class WebsocketServerSessionService extends ServerSessionService<ChannelH
 
     @Override
     protected void init(SsConfig ssConfig) throws Exception {
-        log.info("*********");
-        boss = NettyObjectBuilder.buildEventLoopGroup(ssConfig.websocket.bossGroupNum);
-        worker = NettyObjectBuilder.buildEventLoopGroup(ssConfig.websocket.workerGroupNum);
+        server = new WebSocketServer(new InetSocketAddress(ssConfig.port)) {
+            @Override
+            public void onOpen(WebSocket conn, ClientHandshake handshake) {
+                //连接建立
+            }
 
-        ServerBootstrap serverBootstrap;
+            @Override
+            public void onClose(WebSocket conn, int code, String reason, boolean remote) {
+                removeCtx(conn);
+            }
 
-        serverBootstrap = new ServerBootstrap();
-        serverBootstrap
-                .group(boss, worker)
-                .channel(NettyObjectBuilder.getServerSocketChannelClass())
-                .childOption(ChannelOption.TCP_NODELAY, true)
-                .childHandler(new ChannelInitializer<NioSocketChannel>() {
-                                  @Override
-                                  protected void initChannel(NioSocketChannel ch) throws Exception {
-                                      ChannelPipeline pipeline = ch.pipeline();
-                                      pipeline.addLast(new HttpServerCodec())
-                                              .addLast(new ChunkedWriteHandler())
-                                              .addLast(new HttpObjectAggregator(1024 * 1024 * 10))
-                                              .addLast(new WebSocketServerProtocolHandler("/", null, false, 1024 * 1024 * 50, false, true, 10000L))
-                                              .addLast(new MyHandler());
-                                  }
-                              }
-                );
-        serverBootstrap.bind(ssConfig.port).sync();
+            @Override
+            public void onMessage(WebSocket conn, ByteBuffer message) {
+                try {
+                    byte[] data = new byte[message.remaining()];
+                    message.get(data);
+                    receiveClientBytes(conn, data);
+                } catch (Exception e) {
+                    log.warn("onMessage err", e);
+                    removeCtx(conn);
+                }
+            }
+
+            @Override
+            public void onMessage(WebSocket conn, String message) {
+                //只使用二进制消息，忽略文本消息
+            }
+
+            @Override
+            public void onError(WebSocket conn, Exception ex) {
+                log.warn("ws server error", ex);
+                if (conn != null) {
+                    removeCtx(conn);
+                }
+            }
+
+            @Override
+            public void onStart() {
+                log.info("ws server started on port {}", ssConfig.port);
+            }
+        };
+        server.setConnectionLostTimeout(0);
+        server.start();
     }
 
-
-    @ChannelHandler.Sharable
-    private final class MyHandler extends SimpleChannelInboundHandler<BinaryWebSocketFrame> {
-
-        @Override
-        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-            removeCtx(ctx);
-        }
-
-        @Override
-        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-            super.channelInactive(ctx);
-            removeCtx(ctx);
-        }
-
-        @Override
-        protected void channelRead0(ChannelHandlerContext ctx, BinaryWebSocketFrame msg) throws Exception {
-            byte[] bytes = new byte[msg.content().readableBytes()];
-            msg.content().readBytes(bytes);
-            receiveClientBytes(ctx, bytes);
+    @Override
+    protected void sendBytesToClient(WebSocket conn, byte[] bytes) {
+        try {
+            conn.send(bytes);
+        } catch (Exception e) {
+            log.warn("sendBytesToClient err", e);
+            removeCtx(conn);
         }
     }
 
     @Override
-    protected void sendBytesToClient(ChannelHandlerContext ctx, byte[] bytes) {
-        BinaryWebSocketFrame f = new BinaryWebSocketFrame(BytesUtil.bytes2byteBuf(ctx, bytes));
-        ctx.channel().writeAndFlush(f);
-    }
-
-    @Override
-    protected void closeCtx(ChannelHandlerContext channelHandlerContext) {
-        channelHandlerContext.close();
+    protected void closeCtx(WebSocket conn) {
+        try {
+            conn.close();
+        } catch (Exception ignored) {
+        }
     }
 
     @Override
     public void onExit() {
         try {
-            boss.shutdownGracefully();
+            if (null != server) {
+                server.stop();
+            }
         } catch (Exception e) {
-            log.warn("boss.shutdownGracefully() err", e);
-        }
-        try {
-            worker.shutdownGracefully();
-        } catch (Exception e) {
-            log.warn("worker.shutdownGracefully() err", e);
+            log.warn("server.stop() err", e);
         }
     }
 }

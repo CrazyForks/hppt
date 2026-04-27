@@ -1,16 +1,17 @@
 package org.wowtools.hppt.common.server;
 
-import io.netty.channel.Channel;
 import lombok.extern.slf4j.Slf4j;
+import org.wowtools.hppt.common.pojo.SendAbleSessionBytes;
 import org.wowtools.hppt.common.pojo.SessionBytes;
-import org.wowtools.hppt.common.util.BufferPool;
-import org.wowtools.hppt.common.util.BytesUtil;
 import org.wowtools.hppt.common.util.DebugConfig;
 import org.wowtools.hppt.common.util.RoughTimeUtil;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Socket;
+import java.util.Arrays;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @author liuyu
@@ -20,76 +21,95 @@ import java.util.concurrent.TimeUnit;
 public class ServerSession {
 
     private final LoginClientService.Client client;
-    private final Channel channel;
+    private final Socket socket;
+    private final OutputStream out;
     private final int sessionId;
-
     private final long sessionTimeout;
-
     private final ServerSessionLifecycle lifecycle;
-
-    private final BufferPool<SessionBytes> sendBytesQueue = new BufferPool<>(">ServerSession-sendBytesQueue");
+    private final ReentrantLock writeLock = new ReentrantLock();
     //上次活跃时间
-    private long activeTime;
-
+    private volatile long activeTime;
     private volatile boolean running = true;
 
 
-    ServerSession(long sessionTimeout, int sessionId, LoginClientService.Client client, ServerSessionLifecycle lifecycle, Channel channel) {
+    ServerSession(long sessionTimeout, int sessionId, LoginClientService.Client client,
+                  ServerSessionLifecycle lifecycle, Socket socket) throws IOException {
         this.sessionId = sessionId;
-        this.channel = channel;
+        this.socket = socket;
+        this.out = socket.getOutputStream();
         this.sessionTimeout = sessionTimeout;
         this.lifecycle = lifecycle;
         this.client = client;
         activeSession();
-        startSendThread();
         client.addSession(this);
+        // 启动从目标端口读取数据的线程
+        Thread.startVirtualThread(this::readFromTarget);
     }
 
-    private void startSendThread() {
-        Thread.startVirtualThread(() -> {
+    private void readFromTarget() {
+        try {
+            InputStream in = socket.getInputStream();
+            byte[] buf = new byte[32768];
             while (running) {
-                try {
-                    SessionBytes sessionBytes = sendBytesQueue.poll(10, TimeUnit.SECONDS);
-                    if (null == sessionBytes) {
-                        continue;
-                    }
-                    if (DebugConfig.OpenSerialNumber) {
-                        log.debug("取出session待发送缓冲区数据 >sessionBytes-SerialNumber {}", sessionBytes.getSerialNumber());
-                    }
-                    byte[] bytes = sessionBytes.getBytes();
-
-                    bytes = lifecycle.beforeSendToTarget(this, bytes);
-
-                    if (bytes != null) {
-                        Throwable e = BytesUtil.writeToChannel(channel, bytes);
-                        if (null != e) {
-                            log.warn("BytesUtil.writeToChannel err", e);
-                            throw e;
-                        }
-                        if (log.isDebugEnabled()) {
-                            log.debug("向目标端口发送字节 {}", bytes.length);
-                        }
-                        lifecycle.afterSendToTarget(this, bytes);
-                    }
-                } catch (Throwable e) {
-                    log.warn("SendThread err", e);
-                    close();
+                int n = in.read(buf);
+                if (n == -1) {
+                    break;
                 }
-            }
-            log.info("{} sendThread stop", this);
-        });
+                byte[] bytes = Arrays.copyOf(buf, n);
+                activeSession();
+                log.debug("serverSession {} 收到目标端口字节 {}", sessionId, bytes.length);
 
+                SessionBytes sessionBytes = new SessionBytes(sessionId, bytes);
+                if (DebugConfig.OpenSerialNumber) {
+                    log.debug("目标端发来字节 <sessionBytes-SerialNumber {}", sessionBytes.getSerialNumber());
+                }
+                lifecycle.sendToClientBuffer(sessionBytes, client, new SendAbleSessionBytes.CallBack() {
+                    @Override
+                    public void cb(boolean success) {
+                        // 直接同步回调，不再阻塞等待
+                    }
+                });
+                lifecycle.afterSendToTarget(this, bytes);
+            }
+        } catch (IOException e) {
+            if (running) {
+                log.debug("读取目标端口异常 sessionId={}", sessionId, e);
+            }
+        } finally {
+            close();
+        }
     }
 
     /**
-     * 向目标端口发送字节
+     * 向目标端口发送字节（直接写入，无中间队列）
+     */
+    public void sendToTarget(SessionBytes sessionBytes) {
+        sendToTarget(sessionBytes.getBytes());
+    }
+
+    /**
+     * 向目标端口发送字节（直接写入，无中间队列）
      *
      * @param bytes bytes
      */
-    public void sendToTarget(SessionBytes bytes) {
-        activeSession();
-        if (bytes != null) {
-            sendBytesQueue.add(bytes);
+    public void sendToTarget(byte[] bytes) {
+        writeLock.lock();
+        try {
+            activeSession();
+            bytes = lifecycle.beforeSendToTarget(this, bytes);
+            if (bytes != null) {
+                try {
+                    out.write(bytes);
+                    out.flush();
+                    log.debug("向目标端口发送字节 {}", bytes.length);
+                    lifecycle.afterSendToTarget(this, bytes);
+                } catch (IOException e) {
+                    log.warn("向目标端口发送字节异常", e);
+                    close();
+                }
+            }
+        } finally {
+            writeLock.unlock();
         }
     }
 
@@ -114,10 +134,15 @@ public class ServerSession {
         return sessionId;
     }
 
-
     void close() {
+        if (!running) {
+            return;
+        }
         running = false;
-        channel.close();
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
         client.removeSession(this);
     }
 
@@ -125,12 +150,7 @@ public class ServerSession {
     public String toString() {
         return "("
                 + client.clientId + " "
-                + sessionId + (isTimeOut() ? " timeout)" : " active" +
-                ")");
-    }
-
-    public Channel getChannel() {
-        return channel;
+                + sessionId + (isTimeOut() ? " timeout)" : " active)");
     }
 
     public LoginClientService.Client getClient() {

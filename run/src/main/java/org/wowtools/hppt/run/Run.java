@@ -3,7 +3,6 @@ package org.wowtools.hppt.run;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.joran.JoranConfigurator;
 import ch.qos.logback.core.util.StatusPrinter;
-import io.netty.util.ResourceLeakDetector;
 import org.slf4j.LoggerFactory;
 import org.wowtools.hppt.common.util.ResourcesReader;
 import org.wowtools.hppt.run.sc.RunSc;

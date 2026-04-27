@@ -1,9 +1,9 @@
 package org.wowtools.hppt.common.client;
 
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelHandlerContext;
 import org.wowtools.hppt.common.pojo.SessionBytes;
 import org.wowtools.hppt.common.util.RoughTimeUtil;
+
+import java.net.Socket;
 
 /**
  * @author liuyu
@@ -16,10 +16,10 @@ public interface ClientBytesSender {
      */
     public static abstract class SessionIdCallBack {
         public final long createTime = RoughTimeUtil.getTimestamp();
-        public final ChannelHandlerContext channelHandlerContext;
+        public final Socket socket;
 
-        public SessionIdCallBack(ChannelHandlerContext channelHandlerContext) {
-            this.channelHandlerContext = channelHandlerContext;
+        public SessionIdCallBack(Socket socket) {
+            this.socket = socket;
         }
 
         public abstract void cb(int sessionId);
@@ -28,17 +28,17 @@ public interface ClientBytesSender {
     /**
      * 用户建立连接后，准备新建一个ClientSession前触发
      *
-     * @param port 本地端口
-     * @param ctx  建立连接对应的netty ctx
-     * @param cb   生成一个唯一的sessionId返回，一般需要借助服务端接口来分配id
+     * @param port   本地端口
+     * @param socket 建立连接对应的Socket
+     * @param cb     生成一个唯一的sessionId返回，一般需要借助服务端接口来分配id
      */
-    void connected(int port, ChannelHandlerContext ctx, SessionIdCallBack cb);
+    void connected(int port, Socket socket, SessionIdCallBack cb);
 
     /**
      * 向目标发送字节的具体方式，如post请求，websocket等
      *
      * @param clientSession clientSession
-     * @param sessionBytes         bytes
+     * @param sessionBytes  bytes
      */
     void sendToTarget(ClientSession clientSession, SessionBytes sessionBytes);
 }

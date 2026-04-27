@@ -8,19 +8,24 @@ package org.wowtools.hppt.common.util;
  * @date 2023/3/7
  */
 public class RoughTimeUtil {
-    private static long timestamp = System.currentTimeMillis();
+    private static volatile long timestamp = System.currentTimeMillis();
+    private static volatile boolean running = true;
 
     static {
         Thread.startVirtualThread(() -> {
-            while (true) {
+            while (running) {
                 try {
                     Thread.sleep(5000);
                 } catch (InterruptedException e) {
-                    continue;
+                    break;
                 }
                 timestamp = System.currentTimeMillis();
             }
         });
+    }
+
+    public static void stop() {
+        running = false;
     }
 
     public static long getTimestamp() {

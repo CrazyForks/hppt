@@ -201,18 +201,26 @@ public class ServerTalker {
 
     private static final BufferPool<SendAbleSessionBytesResult> sendAbleSessionBytesResultQueue
             = new BufferPool<>("ServerTalker.sendAbleSessionBytesResultQueue");
+    private static volatile boolean dispatcherRunning = true;
 
     static {
         Thread.startVirtualThread(() -> {
-            while (true) {
+            while (dispatcherRunning) {
                 try {
                     SendAbleSessionBytesResult sendAbleSessionBytesResult = sendAbleSessionBytesResultQueue.take();
                     CbRunnable cbRunnable = new CbRunnable(sendAbleSessionBytesResult);
                     Thread.startVirtualThread(cbRunnable);
                 } catch (Exception e) {
+                    if (e.getCause() instanceof InterruptedException) {
+                        break;
+                    }
                     log.warn("sendAbleSessionBytesResultQueue.take err", e);
                 }
             }
         });
+    }
+
+    public static void stopDispatcher() {
+        dispatcherRunning = false;
     }
 }

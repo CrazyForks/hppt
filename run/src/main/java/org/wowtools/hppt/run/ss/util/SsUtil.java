@@ -1,6 +1,5 @@
 package org.wowtools.hppt.run.ss.util;
 
-import io.netty.util.internal.StringUtil;
 import org.wowtools.hppt.common.server.ServerSessionLifecycle;
 import org.wowtools.hppt.common.server.ServerSessionManagerBuilder;
 import org.wowtools.hppt.run.ss.pojo.SsConfig;
@@ -17,7 +16,7 @@ public class SsUtil {
     }
 
     private static ServerSessionLifecycle buildServerSessionLifecycle(SsConfig ssConfig) {
-        if (StringUtil.isNullOrEmpty(ssConfig.lifecycle)) {
+        if (ssConfig.lifecycle == null || ssConfig.lifecycle.isEmpty()) {
             return new ServerSessionLifecycle() {
             };
         } else {

@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -98,6 +99,9 @@ public class ClientTalker {
     }
 
     //接收服务端发来的字节并做相应处理
+    // 缓冲早于InitSession到达的session字节，保证按序投递
+    private static final ConcurrentHashMap<Integer, LinkedList<byte[]>> pendingSessionBytes = new ConcurrentHashMap<>();
+
     public static boolean receiveServerBytes(CommonConfig config, byte[] responseBody,
                                              ClientSessionManager clientSessionManager, AesCipherUtil aesCipherUtil, BufferPool<String> sendCommandQueue,
                                              Map<Integer, ClientBytesSender.SessionIdCallBack> sessionIdCallBackMap, CommandCallBack commandCallBack) throws Exception {
@@ -139,6 +143,16 @@ public class ClientTalker {
                         } else {
                             log.warn("没有对应的SessionIdCallBack {}", sessionId);
                         }
+                        // InitSession创建session后，立即投递之前缓冲的字节（保证顺序）
+                        LinkedList<byte[]> pending = pendingSessionBytes.remove(sessionId);
+                        if (pending != null) {
+                            ClientSession cs = clientSessionManager.getClientSessionBySessionId(sessionId);
+                            if (cs != null) {
+                                for (byte[] pendingBytes : pending) {
+                                    cs.sendToUser(pendingBytes);
+                                }
+                            }
+                        }
                     }
                     case Constant.ScCommands.CloseSession -> {
                         int sessionId = Integer.parseInt(command.substring(1));
@@ -146,6 +160,7 @@ public class ClientTalker {
                         if (null != session) {
                             clientSessionManager.disposeClientSession(session, "服务端发送关闭命令");
                         }
+                        pendingSessionBytes.remove(sessionId);
                     }
                     case Constant.ScCommands.CheckSessionActive -> {
                         int sessionId = Integer.parseInt(command.substring(1));
@@ -181,27 +196,9 @@ public class ClientTalker {
                 if (clientSession != null) {
                     clientSession.sendToUser(sessionByte.getBytes());
                 } else {
-                    //客户端没有这个session，异步等待一下看是否是未初始化完成
-                    Thread.startVirtualThread(() -> {
-                        ClientSession clientSession1;
-                        //每50ms检测一次，30秒后超时
-                        for (int i = 0; i < 600; i++) {
-                            try {
-                                Thread.sleep(50);
-                            } catch (InterruptedException e) {
-                                continue;
-                            }
-                            clientSession1 = clientSessionManager.getClientSessionBySessionId(sessionByte.getSessionId());
-                            if (null != clientSession1) {
-                                clientSession1.sendToUser(sessionByte.getBytes());
-                                return;
-                            }
-                        }
-//                        //客户端没有这个session 通知服务端关闭
-//                        log.info("sessionId {} 不存在，关闭session", bytesPb.getSessionId());
-//                        sendCommandQueue.add(String.valueOf(Constant.SsCommands.CloseSession) + bytesPb.getSessionId());
-                    });
-
+                    // session尚未创建（InitSession还未到达），缓冲起来
+                    pendingSessionBytes.computeIfAbsent(sessionByte.getSessionId(), k -> new LinkedList<>())
+                            .add(sessionByte.getBytes());
                 }
             }
         }

@@ -1,6 +1,5 @@
 package org.wowtools.hppt.common.util;
 
-import io.netty.util.ResourceLeakDetector;
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.run.Run;
 
@@ -15,8 +14,6 @@ import java.util.Map;
  */
 @Slf4j
 public class DebugConfig {
-    //netty内存泄露检查级别
-    public static final ResourceLeakDetector.Level NettyResourceLeakDetectorLevel;
     //是否开启消息流水号
     public static final boolean OpenSerialNumber;
 
@@ -27,7 +24,6 @@ public class DebugConfig {
     public static final int BufferPoolWaterline;
 
     static {
-        ResourceLeakDetector.Level _NettyResourceLeakDetectorLevel = ResourceLeakDetector.Level.DISABLED;
         boolean _OpenSerialNumber = false;
         boolean _OpenBufferPoolDetector = false;
         int _BufferPoolWaterline = 1000;
@@ -46,14 +42,6 @@ public class DebugConfig {
                 }
             }
 
-            _NettyResourceLeakDetectorLevel = switch (configs.get("NettyResourceLeakDetectorLevel")) {
-                case "0" -> ResourceLeakDetector.Level.DISABLED;
-                case "1" -> ResourceLeakDetector.Level.SIMPLE;
-                case "2" -> ResourceLeakDetector.Level.ADVANCED;
-                case "3" -> ResourceLeakDetector.Level.PARANOID;
-                default -> ResourceLeakDetector.Level.DISABLED;
-            };
-
             _OpenSerialNumber = "1".equals(configs.get("OpenSerialNumber"));
 
             _OpenBufferPoolDetector = "1".equals(configs.get("OpenBufferPoolDetector"));
@@ -63,7 +51,6 @@ public class DebugConfig {
             log.debug("不开启调试模式 ", e);
         }
 
-        NettyResourceLeakDetectorLevel = _NettyResourceLeakDetectorLevel;
         OpenSerialNumber = _OpenSerialNumber;
 
         OpenBufferPoolDetector = _OpenBufferPoolDetector;

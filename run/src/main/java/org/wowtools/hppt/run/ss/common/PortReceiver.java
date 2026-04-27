@@ -12,6 +12,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 普通模式下，数据被发送到真实端口
@@ -42,6 +44,8 @@ final class PortReceiver<CTX> extends Receiver<CTX> {
         LoginClientService.Client client;
         volatile boolean running = true;
         volatile boolean actived = true;
+        final ReentrantLock activeLock = new ReentrantLock();
+        final Condition activeCondition = activeLock.newCondition();
 
         CTX ctx;
         final LoginClientService.ClientActiveWatcher clientActiveWatcher = new LoginClientService.ClientActiveWatcher() {
@@ -53,8 +57,11 @@ final class PortReceiver<CTX> extends Receiver<CTX> {
             @Override
             public void toActivity() {
                 actived = true;
-                synchronized (clientActiveWatcher) {
-                    clientActiveWatcher.notifyAll();
+                activeLock.lock();
+                try {
+                    activeCondition.signalAll();
+                } finally {
+                    activeLock.unlock();
                 }
             }
         };
@@ -138,16 +145,18 @@ final class PortReceiver<CTX> extends Receiver<CTX> {
                     if (null != bytes) {
                         serverSessionService.sendBytesToClient(cell.ctx, bytes);
                     } else if (!cell.actived) {
-                        synchronized (cell.clientActiveWatcher) {
+                        cell.activeLock.lock();
+                        try {
                             log.info("客户端 {} 非活跃，挂起回复消息线程", cell.client.clientId);
-                            do {
+                            while (!cell.actived) {
                                 try {
-                                    cell.clientActiveWatcher.wait(10_000);
+                                    cell.activeCondition.await(10, TimeUnit.SECONDS);
                                 } catch (InterruptedException ignored) {
                                 }
-                            }while (!cell.actived);
+                            }
                             log.info("客户端 {} 活跃，恢复回复消息线程", cell.client.clientId);
-
+                        } finally {
+                            cell.activeLock.unlock();
                         }
                     }
                 } catch (Exception e) {
@@ -189,16 +198,18 @@ final class PortReceiver<CTX> extends Receiver<CTX> {
                         serverSessionService.exit("接收客户端消息错误");
                     }
                 } else if (!cell.actived) {
-                    synchronized (cell.clientActiveWatcher) {
+                    cell.activeLock.lock();
+                    try {
                         log.info("客户端 {} 非活跃，挂起接收消息线程", cell.client.clientId);
-                        do {
+                        while (!cell.actived) {
                             try {
-                                cell.clientActiveWatcher.wait(10_000);
+                                cell.activeCondition.await(10, TimeUnit.SECONDS);
                             } catch (InterruptedException ignored) {
                             }
-                        }while (!cell.actived);
+                        }
                         log.info("客户端 {} 活跃，恢复接收消息线程", cell.client.clientId);
-
+                    } finally {
+                        cell.activeLock.unlock();
                     }
                 }
             }

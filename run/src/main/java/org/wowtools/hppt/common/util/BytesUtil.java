@@ -1,10 +1,5 @@
 package org.wowtools.hppt.common.util;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.util.ReferenceCountUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.pojo.BytesList;
 
@@ -13,7 +8,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Base64;
 import java.util.Collection;
-import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -118,97 +112,6 @@ public class BytesUtil {
             return baos.toByteArray();
         }
     }
-
-    public static ByteBuf bytes2byteBuf(ChannelHandlerContext ctx, byte[] bytes) {
-        ByteBuf byteBuf = ctx.alloc().buffer(bytes.length, bytes.length);
-        byteBuf.writeBytes(bytes);
-        return byteBuf;
-    }
-
-    public static ByteBuf bytes2byteBuf(Channel ctx, byte[] bytes) {
-        ByteBuf byteBuf = ctx.alloc().buffer(bytes.length, bytes.length);
-        byteBuf.writeBytes(bytes);
-        return byteBuf;
-    }
-
-    private static Throwable afterWrite(ChannelFuture future, Object msg) {
-        boolean completed = future.awaitUninterruptibly(10, TimeUnit.SECONDS); // 同步等待完成
-        if (completed) {
-            if (future.isSuccess()) {
-                return null;
-            }
-        }
-        Throwable cause = future.cause();
-        if (null == cause) {
-            cause = new RuntimeException("写入消息未成功");
-        }
-        log.warn("写入消息未成功!!! timeout? {}", !completed, cause);
-        ReferenceCountUtil.safeRelease(msg);
-        return cause;
-    }
-
-    private static Throwable waitChannelWritable(Channel channel) {
-        int i = 0;
-        while (!channel.isWritable() && channel.isOpen()) {
-            i++;
-            if (i > 3000) {
-                return new RuntimeException("waitChannelWritable timeout");
-            }
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-            }
-        }
-        return null;
-    }
-
-    //把字节写入ChannelHandlerContext 如果有异常则返回异常
-    public static Throwable writeToChannelHandlerContext(ChannelHandlerContext ctx, byte[] bytes) {
-        Throwable e = waitChannelWritable(ctx.channel());
-        if (null != e) {
-            return e;
-        }
-        if (!ctx.channel().isOpen()) {
-            return new RuntimeException("channel已关闭");
-        }
-        ByteBuf byteBuf = bytes2byteBuf(ctx, bytes);
-        ChannelFuture future = ctx.writeAndFlush(byteBuf);
-        return afterWrite(future, byteBuf);
-    }
-
-    //把字节写入Channel 如果有异常则返回异常
-    public static Throwable writeToChannel(Channel channel, byte[] bytes) {
-        Throwable e = waitChannelWritable(channel);
-        if (null != e) {
-            return e;
-        }
-        if (!channel.isOpen()) {
-            return new RuntimeException("channel已关闭");
-        }
-        ByteBuf byteBuf = bytes2byteBuf(channel, bytes);
-        ChannelFuture future = channel.writeAndFlush(byteBuf);
-        return afterWrite(future, byteBuf);
-    }
-
-    //把对象写入Channel 如果有异常则返回异常
-    public static Throwable writeObjToChannel(Channel channel, Object obj) {
-        Throwable e = waitChannelWritable(channel);
-        if (null != e) {
-            return e;
-        }
-        if (!channel.isOpen()) {
-            return new RuntimeException("channel已关闭");
-        }
-        ChannelFuture future = channel.writeAndFlush(obj);
-        return afterWrite(future, obj);
-    }
-
-    public static byte[] byteBuf2bytes(ByteBuf byteBuf) {
-        byte[] bytes = new byte[byteBuf.readableBytes()];
-        byteBuf.readBytes(bytes);
-        return bytes;
-    }
-
 
     //把bytes集合转成BytesListPb对应的bytes
     public static byte[] bytesCollection2PbBytes(Collection<byte[]> bytesCollection) {

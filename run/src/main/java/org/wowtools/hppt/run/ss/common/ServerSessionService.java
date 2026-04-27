@@ -17,7 +17,8 @@ public abstract class ServerSessionService<CTX> {
     private final Receiver<CTX> receiver;
 
 
-    protected boolean running = true;
+    protected volatile boolean running = true;
+    private volatile boolean exited = false;
 
     /**
      * @param ssConfig 配置信息
@@ -131,6 +132,10 @@ public abstract class ServerSessionService<CTX> {
      * 当发生难以修复的异常等情况时，主动调用此方法结束当前服务，以便后续自动重启等操作
      */
     public void exit(String type) {
+        if (exited) {
+            return;
+        }
+        exited = true;
         log.warn("ServerSessionService exit,type [{}] service {}", type, this);
         running = false;
         receiver.exit();

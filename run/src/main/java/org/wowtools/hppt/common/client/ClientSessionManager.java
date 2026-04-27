@@ -1,18 +1,15 @@
 package org.wowtools.hppt.common.client;
 
-import io.netty.bootstrap.ServerBootstrap;
-import io.netty.buffer.ByteBuf;
-import io.netty.channel.*;
-import io.netty.channel.socket.SocketChannel;
-import io.netty.handler.codec.ByteToMessageDecoder;
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.pojo.SessionBytes;
-import org.wowtools.hppt.common.util.BytesUtil;
 import org.wowtools.hppt.common.util.DebugConfig;
-import org.wowtools.hppt.common.util.NettyObjectBuilder;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
-import java.util.LinkedList;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -24,42 +21,24 @@ import java.util.concurrent.ConcurrentHashMap;
  * @date 2023/11/18
  */
 @Slf4j
-public class ClientSessionManager {
+public class ClientSessionManager implements AutoCloseable {
     private final Map<Integer, ClientSession> clientSessionMap = new ConcurrentHashMap<>();
-
-    private final ServerBootstrap serverBootstrap = new ServerBootstrap();
     private final ClientSessionLifecycle lifecycle;
     private final ClientBytesSender clientBytesSender;
-
-    private final List<Channel> channels = new LinkedList<>();
-    private final ClientSessionManagerBuilder builder;
-
+    private final int bufferSize;
+    private final List<ServerSocket> serverSockets = new ArrayList<>();
+    private volatile boolean running = true;
 
     ClientSessionManager(ClientSessionManagerBuilder builder) {
-        this.builder = builder;
         lifecycle = builder.lifecycle;
-        if (null == lifecycle) {
+        if (lifecycle == null) {
             throw new RuntimeException("lifecycle不能为空");
         }
         clientBytesSender = builder.clientBytesSender;
-        if (null == clientBytesSender) {
+        if (clientBytesSender == null) {
             throw new RuntimeException("clientBytesSender不能为空");
         }
-        serverBootstrap.group(builder.bossGroup, builder.workerGroup)
-                .channel(NettyObjectBuilder.getServerSocketChannelClass())
-                .option(ChannelOption.SO_BACKLOG, 128)
-                .childOption(ChannelOption.SO_SNDBUF, builder.bufferSize)
-                .childOption(ChannelOption.SO_RCVBUF, builder.bufferSize)
-//                        .handler(new LoggingHandler(LogLevel.INFO))
-                .childHandler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    protected void initChannel(SocketChannel ch) {
-//                                ch.pipeline().addLast(new LoggingHandler(LogLevel.INFO));
-                        ch.pipeline().addLast(new SimpleHandler());
-                        ch.config().setRecvByteBufAllocator(new FixedRecvByteBufAllocator(builder.bufferSize));
-                        ch.config().setSendBufferSize(builder.bufferSize);
-                    }
-                });
+        bufferSize = builder.bufferSize;
     }
 
     /**
@@ -70,30 +49,101 @@ public class ClientSessionManager {
      * @return 绑定成功返回true
      */
     public boolean bindPort(String localHost, int port) {
-        synchronized (channels) {
+        try {
+            ServerSocket ss;
+            if (localHost == null) {
+                ss = new ServerSocket(port);
+            } else {
+                ss = new ServerSocket();
+                ss.bind(new InetSocketAddress(localHost, port));
+            }
+            serverSockets.add(ss);
+            Thread.startVirtualThread(() -> acceptLoop(ss, port));
+            log.debug("bindPort {} success", port);
+            return true;
+        } catch (Exception e) {
+            log.error("Failed to bind port {}.", port, e);
+            return false;
+        }
+    }
+
+    private void acceptLoop(ServerSocket ss, int port) {
+        while (running) {
             try {
-                Channel channel;
-                if (null == localHost) {
-                    channel = serverBootstrap.bind(port).sync().channel();
-                } else {
-                    channel = serverBootstrap.bind(localHost,port).sync().channel();
+                Socket userSocket = ss.accept();
+                userSocket.setTcpNoDelay(true);
+                if (bufferSize > 0) {
+                    userSocket.setSendBufferSize(bufferSize);
+                    userSocket.setReceiveBufferSize(bufferSize);
                 }
-                channel.newSucceededFuture().sync();
-                channels.add(channel);
-                log.debug("bindPort {} success", port);
-                return true;
-            } catch (Exception e) {
-                log.error("Failed to bind port {}.", port, e);
-                return false;
+                // 通知 clientBytesSender 有新连接
+                ClientBytesSender.SessionIdCallBack cb = new ClientBytesSender.SessionIdCallBack(userSocket) {
+                    @Override
+                    public void cb(int sessionId) {
+                        try {
+                            ClientSession clientSession = new ClientSession(sessionId, userSocket, lifecycle);
+                            clientSessionMap.put(sessionId, clientSession);
+                            lifecycle.created(clientSession);
+                            // 启动读取线程
+                            startReadThread(clientSession, port);
+                        } catch (IOException e) {
+                            log.warn("创建ClientSession异常", e);
+                            try {
+                                userSocket.close();
+                            } catch (IOException ignored) {
+                            }
+                        }
+                    }
+                };
+                clientBytesSender.connected(port, userSocket, cb);
+            } catch (IOException e) {
+                if (running) {
+                    log.warn("accept异常", e);
+                }
             }
         }
+    }
 
+    private void startReadThread(ClientSession clientSession, int port) {
+        Thread.startVirtualThread(() -> {
+            try {
+                InputStream in = clientSession.getSocket().getInputStream();
+                byte[] buf = new byte[bufferSize > 0 ? bufferSize : 10240];
+                while (clientSession.isRunning()) {
+                    int n = in.read(buf);
+                    if (n == -1) {
+                        break;
+                    }
+                    byte[] bytes = new byte[n];
+                    System.arraycopy(buf, 0, bytes, 0, n);
+                    if (log.isDebugEnabled()) {
+                        log.debug("ClientSession {} 收到用户端字节 {}", clientSession.getSessionId(), bytes.length);
+                    }
+                    bytes = lifecycle.beforeSendToTarget(clientSession, bytes);
+                    if (bytes == null) {
+                        continue;
+                    }
+                    SessionBytes sessionBytes = new SessionBytes(clientSession.getSessionId(), bytes);
+                    if (DebugConfig.OpenSerialNumber) {
+                        log.debug("用户端发来字节 >sessionBytes-SerialNumber {}", sessionBytes.getSerialNumber());
+                    }
+                    clientBytesSender.sendToTarget(clientSession, sessionBytes);
+                    lifecycle.afterSendToTarget(clientSession, bytes);
+                }
+            } catch (IOException e) {
+                if (clientSession.isRunning()) {
+                    log.debug("读取用户Socket异常 sessionId={}", clientSession.getSessionId(), e);
+                }
+            } finally {
+                disposeClientSession(clientSession, "用户连接关闭");
+            }
+        });
     }
 
     public void disposeClientSession(ClientSession clientSession, String type) {
         clientSession.close();
         log.info("ClientSession {} close,type [{}]", clientSession.getSessionId(), type);
-        if (null != clientSessionMap.remove(clientSession.getSessionId())) {
+        if (clientSessionMap.remove(clientSession.getSessionId()) != null) {
             lifecycle.closed(clientSession);
         }
     }
@@ -106,98 +156,18 @@ public class ClientSessionManager {
         return clientSessionMap.size();
     }
 
-
+    @Override
     public void close() {
-        synchronized (channels) {
-            for (Channel channel : channels) {
-                channel.close();
+        running = false;
+        for (ServerSocket ss : serverSockets) {
+            try {
+                ss.close();
+            } catch (IOException e) {
+                log.debug("关闭ServerSocket异常", e);
             }
         }
-        builder.bossGroup.shutdownGracefully();
-        builder.workerGroup.shutdownGracefully();
-    }
-
-    private final Map<ChannelHandlerContext, ClientSession> clientSessionMapByCtx = new ConcurrentHashMap<>();
-
-    private final class SimpleHandler extends ByteToMessageDecoder {
-        @Override
-        public void channelActive(ChannelHandlerContext channelHandlerContext) throws Exception {
-            super.channelActive(channelHandlerContext);
-            Channel channel = channelHandlerContext.channel();
-            InetSocketAddress localAddress = (InetSocketAddress) channel.localAddress();
-            int localPort = localAddress.getPort();
-            log.debug("client channelActive {}, port:{}", channelHandlerContext.hashCode(), localPort);
-            //用户发起新连接 新建一个ClientSession
-            ClientBytesSender.SessionIdCallBack cb = new ClientBytesSender.SessionIdCallBack(channelHandlerContext) {
-                @Override
-                public void cb(int sessionId) {
-                    ClientSession clientSession = new ClientSession(sessionId, channelHandlerContext, lifecycle);
-                    log.debug("ClientSession {} 初始化完成 {}", clientSession.getSessionId(), channelHandlerContext.hashCode());
-                    clientSessionMapByCtx.put(channelHandlerContext, clientSession);
-                    clientSessionMap.put(sessionId, clientSession);
-                    lifecycle.created(clientSession);
-                }
-            };
-            clientBytesSender.connected(localPort, channelHandlerContext, cb);
-        }
-
-        @Override
-        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-            log.info("client channelInactive {}", ctx.hashCode());
-            super.channelInactive(ctx);
-            ClientSession clientSession = clientSessionMapByCtx.get(ctx);
-            if (null != clientSession) {
-                disposeClientSession(clientSession, "client channelInactive");
-            }
-        }
-
-        @Override
-        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            log.info("client exceptionCaught {}", ctx.hashCode(), cause);
-            ClientSession clientSession = clientSessionMapByCtx.get(ctx);
-            if (null != clientSession) {
-                disposeClientSession(clientSession, "client exceptionCaught");
-            }
-        }
-
-        @Override
-        protected synchronized void decode(ChannelHandlerContext channelHandlerContext, ByteBuf byteBuf, List<Object> list) {
-            byte[] bytes = BytesUtil.byteBuf2bytes(byteBuf);
-            ClientSession clientSession = null;
-            for (int i = 0; i < 1000; i++) {
-                clientSession = clientSessionMapByCtx.get(channelHandlerContext);
-                if (null != clientSession) {
-                    break;
-                }
-                try {
-                    Thread.sleep(100);
-                } catch (InterruptedException e) {
-                    continue;
-                }
-            }
-            if (null != clientSession) {
-//                if (log.isDebugEnabled()) {
-//                    log.debug(new String(bytes, StandardCharsets.UTF_8));
-//                }
-                //触发数据回调事件 转发数据到真实端口
-                if (log.isDebugEnabled()) {
-                    log.debug("ClientSession {} 收到用户端字节 {}", clientSession.getSessionId(), bytes.length);
-                }
-                bytes = lifecycle.beforeSendToTarget(clientSession, bytes);
-                if (null == bytes) {
-                    return;
-                }
-                SessionBytes sessionBytes = new SessionBytes(clientSession.getSessionId(), bytes);
-                if (DebugConfig.OpenSerialNumber) {
-                    log.debug("用户端发来字节 >sessionBytes-SerialNumber {}", sessionBytes.getSerialNumber());
-                }
-                clientBytesSender.sendToTarget(clientSession, sessionBytes);
-                lifecycle.afterSendToTarget(clientSession, bytes);
-            } else {
-                log.warn("找不到channelHandlerContext对应的client session");
-            }
+        for (ClientSession session : clientSessionMap.values()) {
+            session.close();
         }
     }
-
-
 }

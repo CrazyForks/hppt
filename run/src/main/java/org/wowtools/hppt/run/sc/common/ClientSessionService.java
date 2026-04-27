@@ -1,6 +1,5 @@
 package org.wowtools.hppt.run.sc.common;
 
-import io.netty.util.internal.StringUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.client.ClientSession;
 import org.wowtools.hppt.common.client.ClientSessionLifecycle;
@@ -9,6 +8,8 @@ import org.wowtools.hppt.run.sc.pojo.ScConfig;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @author liuyu
@@ -21,6 +22,9 @@ public abstract class ClientSessionService implements AutoCloseable {
 
     public final Receiver receiver;
     protected volatile boolean running = true;
+    private volatile boolean exited = false;
+    private final ReentrantLock syncLock = new ReentrantLock();
+    private final Condition syncCondition = syncLock.newCondition();
 
     private final BlockingQueue<byte[]> receiveServerBytesQueue = new ArrayBlockingQueue<>(128);
 
@@ -101,6 +105,10 @@ public abstract class ClientSessionService implements AutoCloseable {
      * 当发生难以修复的异常等情况时，主动调用此方法结束当前服务，以便后续自动重启等操作
      */
     public void exit() {
+        if (exited) {
+            return;
+        }
+        exited = true;
         running = false;
         receiver.exit();
         try {
@@ -108,8 +116,11 @@ public abstract class ClientSessionService implements AutoCloseable {
         } catch (Exception e) {
             log.warn("doClose error ", e);
         }
-        synchronized (this) {
-            this.notify();
+        syncLock.lock();
+        try {
+            syncCondition.signalAll();
+        } finally {
+            syncLock.unlock();
         }
     }
 
@@ -129,13 +140,13 @@ public abstract class ClientSessionService implements AutoCloseable {
      * 阻塞直到exit方法被调用
      */
     public void sync() {
-        synchronized (this) {
-            try {
-                this.wait();
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
+        syncLock.lock();
+        try {
+            syncCondition.await();
+        } catch (InterruptedException e) {
             log.info("sync interrupted");
+        } finally {
+            syncLock.unlock();
         }
     }
 
@@ -147,7 +158,7 @@ public abstract class ClientSessionService implements AutoCloseable {
                 receiver.closeClientSession(clientSession);
             }
         };
-        if (StringUtil.isNullOrEmpty(config.lifecycle)) {
+        if (config.lifecycle == null || config.lifecycle.isEmpty()) {
             return common;
         } else {
             try {

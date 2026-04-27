@@ -1,6 +1,5 @@
 package org.wowtools.hppt.run.sc.common;
 
-import io.netty.channel.ChannelHandlerContext;
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.client.ClientBytesSender;
 import org.wowtools.hppt.common.client.ClientSession;
@@ -11,12 +10,14 @@ import org.wowtools.hppt.common.util.*;
 import org.wowtools.hppt.run.sc.pojo.ScConfig;
 import org.wowtools.hppt.run.sc.util.ScUtil;
 
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * @author liuyu
@@ -33,16 +34,17 @@ final class PortReceiver implements Receiver {
     private final BufferPool<SessionBytes> sendBytesQueue = new BufferPool<>(">PortReceiver-sendBytesQueue");
 
     private final Map<Integer, ClientBytesSender.SessionIdCallBack> sessionIdCallBackMap = new ConcurrentHashMap<>();//<newSessionFlag,cb>
-    private AesCipherUtil aesCipherUtil;
+    private volatile AesCipherUtil aesCipherUtil;
+    private final ReentrantLock dtLock = new ReentrantLock();
 
-    private Long dt;
+    private volatile long dt = 0;
 
     private boolean firstLoginErr = true;
-    private boolean noLogin = true;
+    private volatile boolean noLogin = true;
 
     private volatile boolean running = true;
     //服务端回复心跳包的时间
-    private long serverHeartbeatTime = System.currentTimeMillis();
+    private volatile long serverHeartbeatTime = System.currentTimeMillis();
 
     private final ClientTalker.CommandCallBack commandCallBack = (type, param) -> {
         if (Constant.ScCommands.Heartbeat == type) {
@@ -102,7 +104,7 @@ final class PortReceiver implements Receiver {
                 clientSessionService.sendBytesToServer(GridAesCipherUtil.encrypt("dt".getBytes(StandardCharsets.UTF_8)));
                 //等待时间戳返回
                 int n = 0;
-                while (null == dt && clientSessionService.running) {
+                while (dt == 0 && clientSessionService.running) {
                     try {
                         Thread.sleep(100);
                     } catch (InterruptedException e) {
@@ -137,13 +139,16 @@ final class PortReceiver implements Receiver {
             String[] cmd = s.split(" ", 2);
             switch (cmd[0]) {
                 case "dt":
-                    synchronized (this) {
-                        if (null == dt) {
+                    dtLock.lock();
+                    try {
+                        if (dt == 0) {
                             long localTs = System.currentTimeMillis();
                             long serverTs = Long.parseLong(cmd[1]);
                             dt = serverTs - localTs;
                             log.info("dt {} ms", dt);
                         }
+                    } finally {
+                        dtLock.unlock();
                     }
                     break;
                 case "login":
@@ -158,7 +163,7 @@ final class PortReceiver implements Receiver {
                         sendLoginCommand();
                     } else {
                         log.error("登录失败 {}", code);
-                        System.exit(0);
+                        clientSessionService.exit();
                     }
                     break;
                 default:
@@ -207,7 +212,10 @@ final class PortReceiver implements Receiver {
                     for (Map.Entry<Integer, ClientBytesSender.SessionIdCallBack> entry : timeoutEntries) {
                         log.warn("session长期未连接成功，疑似连接故障，主动关闭");
                         sessionIdCallBackMap.remove(entry.getKey());
-                        entry.getValue().channelHandlerContext.close();
+                        try {
+                            entry.getValue().socket.close();
+                        } catch (Exception ignored) {
+                        }
                     }
                 } catch (Exception e) {
                     log.warn("checkSessionInit", e);
@@ -221,6 +229,11 @@ final class PortReceiver implements Receiver {
         return new Thread(() -> {
             while (running) {
                 try {
+                    if (noLogin) {
+                        // 登录完成前无法加密发送，等待
+                        Thread.sleep(100);
+                        continue;
+                    }
                     byte[] sendBytes = ClientTalker.buildSendToServerBytes(config, config.maxSendBodySize, sendCommandQueue, sendBytesQueue, aesCipherUtil, true);
                     if (null != sendBytes) {
                         log.debug("sendBytesToServer {}", sendBytes.length);
@@ -244,7 +257,7 @@ final class PortReceiver implements Receiver {
             private final AtomicInteger newSessionFlagIdx = new AtomicInteger();
 
             @Override
-            public void connected(int port, ChannelHandlerContext ctx, SessionIdCallBack cb) {
+            public void connected(int port, Socket socket, SessionIdCallBack cb) {
                 for (ScConfig.Forward forward : config.forwards) {
                     if (forward.localPort == port) {
                         int newSessionFlag = newSessionFlagIdx.addAndGet(1);
@@ -252,7 +265,7 @@ final class PortReceiver implements Receiver {
                         sendCommandQueue.add(cmd);
                         log.debug("connected command: {}", cmd);
                         sessionIdCallBackMap.put(newSessionFlag, cb);
-                        log.info("建立连接 {}: {}->{}:{}", ctx.hashCode(), forward.localPort, forward.remoteHost, forward.remotePort);
+                        log.info("建立连接 {}: {}->{}:{}", socket.getPort(), forward.localPort, forward.remoteHost, forward.remotePort);
                         try {
                             clientSessionService.newConnected();
                         } catch (Exception e) {

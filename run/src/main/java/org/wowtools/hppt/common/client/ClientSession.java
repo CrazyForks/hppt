@@ -1,11 +1,11 @@
 package org.wowtools.hppt.common.client;
 
-import io.netty.channel.ChannelHandlerContext;
 import lombok.extern.slf4j.Slf4j;
-import org.wowtools.hppt.common.util.BufferPool;
-import org.wowtools.hppt.common.util.BytesUtil;
 
-import java.util.concurrent.TimeUnit;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.Socket;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 客户端会话
@@ -16,59 +16,64 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class ClientSession {
     private final int sessionId;
-    private final ChannelHandlerContext channelHandlerContext;
-
-    private final BufferPool<byte[]> sendToUserBytesQueue = new BufferPool<>("<ClientSession-sendToUserBytesQueue");
+    private final Socket socket;
+    private final OutputStream out;
+    private final ClientSessionLifecycle lifecycle;
+    private final ReentrantLock writeLock = new ReentrantLock();
     private volatile boolean running = true;
 
-    ClientSession(int sessionId, ChannelHandlerContext channelHandlerContext, ClientSessionLifecycle lifecycle) {
+    ClientSession(int sessionId, Socket socket, ClientSessionLifecycle lifecycle) throws IOException {
         this.sessionId = sessionId;
-        this.channelHandlerContext = channelHandlerContext;
-        Thread.startVirtualThread(() -> {
-            while (running) {
-                byte[] bytes = sendToUserBytesQueue.poll(10, TimeUnit.SECONDS);
-                if (null == bytes) {
-                    continue;
-                }
-                bytes = lifecycle.beforeSendToUser(this, bytes);
-                if (null != bytes) {
-                    log.debug("ClientSession {} 向用户发送字节 {}", sessionId, bytes.length);
-                    Throwable e = BytesUtil.writeToChannelHandlerContext(channelHandlerContext, bytes);
-                    if (null != e) {
-                        log.warn("向用户发送字节异常", e);
-                        close();
-                    } else if (log.isDebugEnabled()) {
-                        log.debug("ClientSession {} 向用户发送字节完成 {}", sessionId, bytes.length);
-                    }
-                    lifecycle.afterSendToUser(this, bytes);
-                }
-            }
-            log.debug("ClientSession {} 接收线程结束", sessionId);
-        });
+        this.socket = socket;
+        this.out = socket.getOutputStream();
+        this.lifecycle = lifecycle;
     }
 
     /**
-     * 发bytes到用户
+     * 直接写入用户Socket
      *
      * @param bytes bytes
      */
     public void sendToUser(byte[] bytes) {
-        sendToUserBytesQueue.add(bytes);
+        writeLock.lock();
+        try {
+            bytes = lifecycle.beforeSendToUser(this, bytes);
+            if (bytes != null) {
+                try {
+                    out.write(bytes);
+                    out.flush();
+                    lifecycle.afterSendToUser(this, bytes);
+                } catch (IOException e) {
+                    log.warn("向用户发送字节异常 sessionId={}", sessionId, e);
+                    close();
+                }
+            }
+        } finally {
+            writeLock.unlock();
+        }
     }
-
 
     public int getSessionId() {
         return sessionId;
     }
 
-    public ChannelHandlerContext getChannelHandlerContext() {
-        return channelHandlerContext;
+    public Socket getSocket() {
+        return socket;
     }
 
     void close() {
+        if (!running) {
+            return;
+        }
         running = false;
-        channelHandlerContext.close();
+        try {
+            socket.close();
+        } catch (IOException e) {
+            log.debug("关闭socket异常", e);
+        }
     }
 
-
+    public boolean isRunning() {
+        return running;
+    }
 }
