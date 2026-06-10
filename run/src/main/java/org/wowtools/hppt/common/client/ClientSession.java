@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -21,6 +22,7 @@ public class ClientSession {
     private final ClientSessionLifecycle lifecycle;
     private final ReentrantLock writeLock = new ReentrantLock();
     private volatile boolean running = true;
+    private final AtomicLong bytesToUser = new AtomicLong();
 
     ClientSession(int sessionId, Socket socket, ClientSessionLifecycle lifecycle) throws IOException {
         this.sessionId = sessionId;
@@ -42,6 +44,7 @@ public class ClientSession {
                 try {
                     out.write(bytes);
                     out.flush();
+                    bytesToUser.addAndGet(bytes.length);
                     lifecycle.afterSendToUser(this, bytes);
                 } catch (IOException e) {
                     log.warn("向用户发送字节异常 sessionId={}", sessionId, e);
@@ -66,6 +69,7 @@ public class ClientSession {
             return;
         }
         running = false;
+        log.info("ClientSession关闭 sessionId={} bytesToUser={}", sessionId, bytesToUser.get());
         try {
             socket.close();
         } catch (IOException e) {

@@ -4,13 +4,13 @@
 
 ![示例1](../img/3.jpg)
 
-1、在集群中任一服务器上新建一个hppt目录，并上传hppt.jar、ss.yml、log4j2.xml文件到此目录下:
+1、在集群中任一服务器上新建一个hppt目录，并上传hppt.jar、ss.yml、logback.xml文件到此目录下:
 
 ```
 hppt
     - hppt.jar 
     - ss.yml
-    - log4j2.xml
+    - logback.xml
 ```
 
 并调整ss.yml的配置信息:
@@ -57,15 +57,15 @@ server {
     ...
 ```
 
-随后，访问`http://111.222.33.44:80/aaa/` 能看到“not a WebSocket handshake request”字样即证明服务端部署成功。
+随后，访问`http://111.222.33.44:80/aaa/` 能看到非 WebSocket 握手相关的错误响应，即可说明请求已经转发到 hppt 的 websocket 服务端。真正的连通性仍应以 `sc` 成功登录并完成端口代理为准。
 
-2、自己笔记本上，新建一个hppt目录，拷贝hppt.jar、sc.yml、log4j2.xml文件到此目录下:
+2、自己笔记本上，新建一个hppt目录，拷贝hppt.jar、sc.yml、logback.xml文件到此目录下:
 
 ```
 hppt
     - hppt.jar
     - sc.yml
-    - log4j2.xml
+    - logback.xml
 ```
 
 并调整sc.yml的配置信息:
@@ -81,7 +81,7 @@ clientPassword: 12345
 
 websocket:
   #服务端http地址，可以填nginx转发过的地址
-  serverUrl: "ws://111.222.33.44:80/aaa"
+  serverUrl: "ws://111.222.33.44:80/aaa/"
   # 服务端http地址，不用nginx的话直接配原始的服务端端口
   #serverUrl: "ws://111.222.33.44:20871"
 forwards:

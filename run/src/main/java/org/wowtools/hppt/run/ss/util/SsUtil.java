@@ -12,6 +12,7 @@ public class SsUtil {
 
     public static ServerSessionManagerBuilder createServerSessionManagerBuilder(SsConfig ssConfig) {
         return new ServerSessionManagerBuilder()
+                .setSessionTimeout(ssConfig.sessionTimeout)
                 .setLifecycle(buildServerSessionLifecycle(ssConfig));
     }
 

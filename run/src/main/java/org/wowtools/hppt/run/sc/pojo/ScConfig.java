@@ -188,15 +188,35 @@ public class ScConfig extends CommonConfig {
     public FileConfig file = new FileConfig();
 
     /**
-     * 内部字段，是否中继模式，不要尝试从配置文件中配置它
-     */
-    public boolean isRelay = false;
-
-
-    /**
      * 心跳周期 毫秒，若此值大于0，定期向服务端发送心跳包
      */
     public long heartbeatPeriod  = 120_000;
+
+    /**
+     * 接收服务端数据的内部队列大小，默认2048。
+     * 对于RDP等突发高带宽协议，建议设置较大的值（如2048或更高）以避免队列溢出导致连接断开。
+     */
+    public int receiveQueueSize = 2048;
+
+    /**
+     * 连接断开或服务异常退出后的重启等待时间(毫秒)
+     */
+    public long restartDelayMillis = 1000;
+
+    /**
+     * 传输层断开后的首次重连等待时间(毫秒)
+     */
+    public long transportReconnectBaseDelayMillis = 1000;
+
+    /**
+     * 传输层断开后的最大重连等待时间(毫秒)
+     */
+    public long transportReconnectMaxDelayMillis = 15000;
+
+    /**
+     * 传输层重连等待抖动(毫秒)
+     */
+    public long transportReconnectJitterMillis = 300;
 
 
 }

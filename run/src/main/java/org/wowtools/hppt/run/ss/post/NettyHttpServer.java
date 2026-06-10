@@ -61,38 +61,48 @@ class PostHandler implements HttpHandler {
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         try {
-            String uri = exchange.getRequestURI().toString();
-            String[] arr = uri.split("\\?", 2);
-            String path = arr[0];
-            String cookie = arr.length > 1 && arr[1].startsWith("c=") ? arr[1].substring(2) : null;
+            String path = exchange.getRequestURI().getPath();
+            String method = exchange.getRequestMethod();
 
-            if (cookie == null) {
-                sendResponse(exchange, 400, emptyBytes);
-                return;
-            }
-
-            if ("/s".equals(path) && "POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            if ("/s".equals(path) && "POST".equalsIgnoreCase(method)) {
+                String cookie = getCookie(exchange);
+                if (cookie == null) {
+                    discardRequestBody(exchange);
+                    sendResponse(exchange, 400, emptyBytes, true);
+                    return;
+                }
                 handleSend(exchange, cookie);
-            } else if ("/r".equals(path) && "POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            } else if ("/r".equals(path) && "POST".equalsIgnoreCase(method)) {
+                String cookie = getCookie(exchange);
+                if (cookie == null) {
+                    discardRequestBody(exchange);
+                    sendResponse(exchange, 400, emptyBytes, true);
+                    return;
+                }
                 handleReply(exchange, cookie);
             } else {
-                sendResponse(exchange, 404, emptyBytes);
+                discardRequestBody(exchange);
+                sendResponse(exchange, 404, emptyBytes, true);
             }
         } catch (IOException e) {
             log.debug("handle io err", e);
         } catch (Exception e) {
             log.warn("handle err", e);
             try {
-                sendResponse(exchange, 500, emptyBytes);
+                discardRequestBody(exchange);
+                sendResponse(exchange, 500, emptyBytes, true);
             } catch (IOException ignored) {
             }
+        } finally {
+            exchange.close();
         }
     }
 
     private void handleSend(HttpExchange exchange, String cookie) throws IOException {
         PostCtx ctx = postServerSessionService.ctxMap.computeIfAbsent(cookie, (c) -> new PostCtx(cookie));
+        ctx.touch();
         receive(ctx, exchange);
-        sendResponse(exchange, 200, emptyBytes);
+        sendResponse(exchange, 200, emptyBytes, false);
     }
 
     private void receive(PostCtx ctx, HttpExchange exchange) throws IOException {
@@ -109,11 +119,13 @@ class PostHandler implements HttpHandler {
     }
 
     private void handleReply(HttpExchange exchange, String cookie) throws IOException, InterruptedException {
+        discardRequestBody(exchange);
         PostCtx ctx = postServerSessionService.ctxMap.get(cookie);
         if (ctx != null) {
+            ctx.touch();
             write(exchange, ctx);
         } else {
-            sendResponse(exchange, 404, emptyBytes);
+            sendResponse(exchange, 200, emptyBytes, false);
         }
     }
 
@@ -125,7 +137,7 @@ class PostHandler implements HttpHandler {
         List<byte[]> bytesList = new LinkedList<>();
         byte[] rBytes = ctx.sendQueue.poll(waitResponseTime, TimeUnit.MILLISECONDS);
         if (null == rBytes) {
-            sendResponse(exchange, 200, emptyBytes);
+            sendResponse(exchange, 200, emptyBytes, false);
             return;
         }
         bytesList.add(rBytes);
@@ -133,14 +145,37 @@ class PostHandler implements HttpHandler {
         ctx.sendQueue.drainToList(bytesList);
         rBytes = BytesUtil.bytesCollection2PbBytes(bytesList);
         log.debug("向客户端发送字节 bytesList {} body {}", bytesList.size(), rBytes.length);
-        sendResponse(exchange, 200, rBytes);
+        sendResponse(exchange, 200, rBytes, false);
     }
 
-    private void sendResponse(HttpExchange exchange, int code, byte[] body) throws IOException {
-        exchange.getResponseHeaders().set("Content-Length", String.valueOf(body.length));
+    private static String getCookie(HttpExchange exchange) {
+        String query = exchange.getRequestURI().getRawQuery();
+        if (query == null || query.isEmpty()) {
+            return null;
+        }
+        for (String item : query.split("&")) {
+            if (item.startsWith("c=") && item.length() > 2) {
+                return item.substring(2);
+            }
+        }
+        return null;
+    }
+
+    private static void discardRequestBody(HttpExchange exchange) throws IOException {
+        try (InputStream ignored = exchange.getRequestBody()) {
+            ignored.transferTo(OutputStream.nullOutputStream());
+        }
+    }
+
+    private void sendResponse(HttpExchange exchange, int code, byte[] body, boolean closeConnection) throws IOException {
+        if (closeConnection) {
+            exchange.getResponseHeaders().set("Connection", "close");
+        }
         exchange.sendResponseHeaders(code, body.length);
         try (OutputStream os = exchange.getResponseBody()) {
-            os.write(body);
+            if (body.length > 0) {
+                os.write(body);
+            }
         }
     }
 }

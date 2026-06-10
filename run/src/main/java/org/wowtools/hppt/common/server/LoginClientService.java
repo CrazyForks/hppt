@@ -61,6 +61,28 @@ public class LoginClientService {
             return commandQueue.drainToList();
         }
 
+        public boolean hasPendingReply() {
+            return !commandQueue.isEmpty() || !sessionBytesQueue.isEmpty();
+        }
+
+        public int getSessionCount() {
+            synchronized (sessions) {
+                return sessions.size();
+            }
+        }
+
+        public int getPendingCommandCount() {
+            return commandQueue.size();
+        }
+
+        public int getPendingSessionBytesCount() {
+            return sessionBytesQueue.size();
+        }
+
+        public int getPendingReceiveBytesCount() {
+            return receiveClientBytes.size();
+        }
+
         public void addSession(ServerSession session) {
             synchronized (sessions) {
                 int s1 = sessions.size();
@@ -109,36 +131,6 @@ public class LoginClientService {
                 }
             }
             return merge(bytesList);
-
-        }
-
-        //取出所有需要向客户端发送的bytes 取出的bytes会按相同sessionId进行整合 无bytes则阻塞3秒后返回
-        public List<SendAbleSessionBytes> fetchBytesBlocked(long maxReturnBodySize) {
-            List<SendAbleSessionBytes> bytesList = new LinkedList<>();
-            SendAbleSessionBytes first= sessionBytesQueue.poll(3, TimeUnit.SECONDS);
-            if (null == first) {
-                return bytesList;
-            }
-            bytesList.add(first);
-            if (sessionBytesQueue.isEmpty()) {
-                return bytesList;
-            }
-            if (maxReturnBodySize < 0) {
-                sessionBytesQueue.drainToList(bytesList);
-                return merge(bytesList);
-            } else {
-                //根据maxReturnBodySize的限制取出队列中的数据返回
-                long currentReturnBodySize = first.sessionBytes().getBytes().length;
-                while (currentReturnBodySize < maxReturnBodySize) {
-                    SendAbleSessionBytes next = sessionBytesQueue.poll();
-                    if (null == next) {
-                        break;
-                    }
-                    bytesList.add(next);
-                    currentReturnBodySize += next.sessionBytes().getBytes().length;
-                }
-                return merge(bytesList);
-            }
 
         }
 

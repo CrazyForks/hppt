@@ -1,0 +1,21 @@
+# 和服务端的type保持一致
+type: hppt
+# 客户端用户名，每个sc进程用一个，不要重复
+clientUser: user1
+# 客户端密码
+clientPassword: 12345
+
+
+hppt:
+  #服务端地址
+  host: "localhost"
+  #服务端端口
+  port: 20871
+
+forwards:
+  - localPort: 10022
+    remoteHost: "localhost"
+    remotePort: 22
+
+# 心跳包发送周期
+heartbeatPeriod: 30000

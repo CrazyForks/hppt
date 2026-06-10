@@ -2,7 +2,6 @@ package org.wowtools.hppt.run.ss.pojo;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.wowtools.hppt.common.util.CommonConfig;
-import org.wowtools.hppt.run.sc.pojo.ScConfig;
 
 import java.util.ArrayList;
 
@@ -25,11 +24,6 @@ public class SsConfig extends CommonConfig {
     public String addonsPath;
 
     /**
-     * 中继模式下，配置一个ScConfig，即构造一个sc转发给下一个ss
-     */
-    public ScConfig relayScConfig;
-
-    /**
      * 服务端口
      */
     public int port;
@@ -47,7 +41,7 @@ public class SsConfig extends CommonConfig {
     /**
      * 超过sessionTimeout，给客户端发送存活确认命令，若下一个sessionTimeout内未收到确认，则强制关闭服务
      */
-    public long sessionTimeout = 120000;
+    public long sessionTimeout = 300000;
 
     /**
      * 接收到客户端/真实端口的数据时，数据被暂存在一个队列里，队列满后强制关闭会话
@@ -170,6 +164,25 @@ public class SsConfig extends CommonConfig {
 
     public RPostConfig rpost = new RPostConfig();
 
+    public static final class ManagementConfig {
+        /**
+         * 管理端口，<=0 时关闭管理接口
+         */
+        public int port = 0;
+
+        /**
+         * 管理接口监听地址，默认仅本机可访问
+         */
+        public String host = "127.0.0.1";
+
+        /**
+         * 可选 Bearer token。监听非本机地址时必须配置，避免管理接口裸露。
+         */
+        public String token = "";
+    }
+
+    public ManagementConfig management = new ManagementConfig();
+
     public static final class FileConfig {
         /**
          * 共享文件夹路径
@@ -179,4 +192,24 @@ public class SsConfig extends CommonConfig {
     }
 
     public FileConfig file = new FileConfig();
+
+    /**
+     * 连接断开或服务异常退出后的重启等待时间(毫秒)
+     */
+    public long restartDelayMillis = 1000;
+
+    /**
+     * 传输层断开后的首次重连等待时间(毫秒)
+     */
+    public long transportReconnectBaseDelayMillis = 1000;
+
+    /**
+     * 传输层断开后的最大重连等待时间(毫秒)
+     */
+    public long transportReconnectMaxDelayMillis = 15000;
+
+    /**
+     * 传输层重连等待抖动(毫秒)
+     */
+    public long transportReconnectJitterMillis = 300;
 }

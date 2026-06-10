@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * @author liuyu
@@ -18,6 +19,8 @@ import java.util.concurrent.TimeUnit;
  */
 @Slf4j
 public class ClientTalker {
+    private static final long WAIT_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(3);
+    private static final long WAIT_POLL_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(50);
 
     public interface CommandCallBack {
         void cb(char type, String param) throws Exception;
@@ -38,6 +41,9 @@ public class ClientTalker {
     public static byte[] buildSendToServerBytes(CommonConfig config, long maxSendBodySize,
                                                 BufferPool<String> sendCommandQueue, BufferPool<SessionBytes> sendBytesQueue,
                                                 AesCipherUtil aesCipherUtil, boolean wait) throws Exception {
+        if (wait && sendCommandQueue.isEmpty() && sendBytesQueue.isEmpty()) {
+            waitForOutboundData(sendCommandQueue, sendBytesQueue);
+        }
         long sendBodySize = 0;//大致预估发送体积
         //命令
         LinkedList<String> commands = new LinkedList<>();
@@ -61,13 +67,7 @@ public class ClientTalker {
             if (sendBodySize >= maxSendBodySize) {
                 break;
             }
-            SessionBytes bytes;
-            if (wait) {
-                bytes = sendBytesQueue.poll(3, TimeUnit.SECONDS);
-                wait = false;
-            } else {
-                bytes = sendBytesQueue.poll();
-            }
+            SessionBytes bytes = sendBytesQueue.poll();
             if (null == bytes) {
                 break;
             }
@@ -98,9 +98,24 @@ public class ClientTalker {
 
     }
 
+    private static void waitForOutboundData(BufferPool<String> sendCommandQueue, BufferPool<SessionBytes> sendBytesQueue) {
+        long deadline = System.nanoTime() + WAIT_TIMEOUT_NANOS;
+        while (sendCommandQueue.isEmpty() && sendBytesQueue.isEmpty()) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                return;
+            }
+            LockSupport.parkNanos(Math.min(remaining, WAIT_POLL_INTERVAL_NANOS));
+        }
+    }
+
     //接收服务端发来的字节并做相应处理
     // 缓冲早于InitSession到达的session字节，保证按序投递
     private static final ConcurrentHashMap<Integer, LinkedList<byte[]>> pendingSessionBytes = new ConcurrentHashMap<>();
+
+    public static void clearPendingSessionBytes() {
+        pendingSessionBytes.clear();
+    }
 
     public static boolean receiveServerBytes(CommonConfig config, byte[] responseBody,
                                              ClientSessionManager clientSessionManager, AesCipherUtil aesCipherUtil, BufferPool<String> sendCommandQueue,

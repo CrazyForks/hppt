@@ -2,6 +2,7 @@ package org.wowtools.hppt.run.ss.hppt;
 
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.util.FrameIo;
+import org.wowtools.hppt.common.util.IoThreadUtil;
 import org.wowtools.hppt.run.ss.common.ServerSessionService;
 import org.wowtools.hppt.run.ss.pojo.SsConfig;
 
@@ -32,19 +33,19 @@ public class HpptServerSessionService extends ServerSessionService<Socket> {
     protected void init(SsConfig ssConfig) throws Exception {
         lengthFieldLength = ssConfig.hppt.lengthFieldLength;
         serverSocket = new ServerSocket(ssConfig.port);
-        Thread.startVirtualThread(() -> {
+        IoThreadUtil.startIoThread(() -> {
             while (running) {
                 try {
                     Socket clientSocket = serverSocket.accept();
                     clientSocket.setTcpNoDelay(true);
-                    Thread.startVirtualThread(() -> readLoop(clientSocket));
+                    IoThreadUtil.startIoThread(() -> readLoop(clientSocket), "hppt-io-server-read-" + clientSocket.getPort());
                 } catch (Exception e) {
                     if (running) {
                         log.warn("accept err", e);
                     }
                 }
             }
-        });
+        }, "hppt-io-server-accept");
     }
 
     private void readLoop(Socket socket) {
@@ -59,7 +60,7 @@ public class HpptServerSessionService extends ServerSessionService<Socket> {
             }
         } catch (Exception e) {
             if (running) {
-                log.debug("readLoop err", e);
+                log.warn("readLoop err", e);
             }
         } finally {
             removeCtx(socket);

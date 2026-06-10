@@ -6,6 +6,7 @@ import java.io.InputStream;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 
 /**
@@ -45,8 +46,12 @@ public class ResourcesReader {
      */
     public static String readStr(Class<?> clazz, String path) {
         try {
+            Path inputPath = Paths.get(path);
+            if (inputPath.isAbsolute()) {
+                return readStr(inputPath.toString());
+            }
             String basePath = getRootPath(clazz);
-            return readStr(basePath + "/" + path);
+            return readStr(Paths.get(basePath, path).toString());
         } catch (Exception e) {
             throw new RuntimeException("读取配置文件异常", e);
         }

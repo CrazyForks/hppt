@@ -12,9 +12,18 @@ import java.util.concurrent.LinkedBlockingQueue;
 public class PostCtx {
     final String cookie;
     final BufferPool<byte[]> sendQueue = new BufferPool<>(">PostCtx-sendQueue");
+    private volatile long lastRequestTime = System.currentTimeMillis();
 
     public PostCtx(String cookie) {
         this.cookie = cookie;
+    }
+
+    public void touch() {
+        lastRequestTime = System.currentTimeMillis();
+    }
+
+    public long getLastRequestTime() {
+        return lastRequestTime;
     }
 
 }

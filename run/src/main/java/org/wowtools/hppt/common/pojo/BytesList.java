@@ -2,6 +2,7 @@ package org.wowtools.hppt.common.pojo;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.UnsafeByteOperations;
 import lombok.Getter;
 import org.wowtools.hppt.common.protobuf.ProtoMessage;
 import org.wowtools.hppt.common.util.DebugConfig;
@@ -70,7 +71,7 @@ public class BytesList {
     public ProtoMessage.BytesListPb.Builder toProto() {
         List<ByteString> byteStringList = new ArrayList<>(bytesCollection.size());
         for (byte[] bytes : bytesCollection) {
-            byteStringList.add(ByteString.copyFrom(bytes));
+            byteStringList.add(UnsafeByteOperations.unsafeWrap(bytes));
         }
         ProtoMessage.BytesListPb.Builder builder = ProtoMessage.BytesListPb.newBuilder();
         builder.addAllBytesList(byteStringList);

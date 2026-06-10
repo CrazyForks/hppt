@@ -19,36 +19,46 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
 public class RPostClientSessionService extends ClientSessionService {
+    private static final byte[] WAKEUP_MARKER = new byte[0];
 
-    private final BlockingQueue<byte[]> sendQueue = new LinkedBlockingQueue<>();
+    private BlockingQueue<byte[]> sendQueue;
     private HttpServer server;
+    private AtomicBoolean transportConnected;
+    private volatile long lastTransportActivityTime;
+    private volatile Cb connectionCb;
+    private long inactivityTimeoutMillis;
 
     public RPostClientSessionService(ScConfig config) throws Exception {
         super(config);
     }
 
     @Override
-    public void connectToServer(ScConfig config, Cb cb) {
+    public void connectToServer(ScConfig config, Cb cb) throws Exception {
         try {
+            ensureInitialized();
+            connectionCb = cb;
+            inactivityTimeoutMillis = Math.max(1000L, config.heartbeatPeriod > 0 ? config.heartbeatPeriod * 2L : 15000L);
             int port = config.rpost.port;
             server = HttpServer.create(new InetSocketAddress(port), 0);
             server.createContext("/", new RPostHandler(config));
             server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
             server.start();
             log.info("HTTP服务端启动完成，端口 {}", port);
-            cb.end(null);
+            startTransportWatchdog();
         } catch (Exception e) {
             log.warn("start err", e);
-            exit();
-            cb.end(e);
+            exit("rpost listener start err:" + e.getMessage());
+            throw e;
         }
     }
 
     @Override
     public void sendBytesToServer(byte[] bytes) {
+        ensureInitialized();
         sendQueue.add(bytes);
     }
 
@@ -57,6 +67,22 @@ public class RPostClientSessionService extends ClientSessionService {
         if (null != server) {
             server.stop(0);
         }
+    }
+
+    @Override
+    protected void onTransportDisconnected(String reason) {
+        ensureInitialized();
+        sendQueue.clear();
+        sendQueue.offer(WAKEUP_MARKER);
+    }
+
+    @Override
+    protected boolean handleHeartbeatTimeout() {
+        ensureInitialized();
+        if (transportConnected.compareAndSet(true, false)) {
+            transportDisconnected("heartbeat timeout");
+        }
+        return true;
     }
 
     private class RPostHandler implements HttpHandler {
@@ -69,6 +95,7 @@ public class RPostClientSessionService extends ClientSessionService {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             try {
+                touchTransport();
                 String path = exchange.getRequestURI().getPath();
                 if ("/s".equals(path)) {
                     sendResponse(exchange);
@@ -89,7 +116,15 @@ public class RPostClientSessionService extends ClientSessionService {
         }
 
         private void sendResponse(HttpExchange exchange) throws IOException, InterruptedException {
-            byte[] rBytes = sendQueue.poll(config.rpost.waitResponseTime, TimeUnit.MILLISECONDS);
+            ensureInitialized();
+            long waitMillis = transportConnected.get()
+                    ? config.rpost.waitResponseTime
+                    : Math.min(1000L, config.rpost.waitResponseTime);
+            byte[] rBytes = sendQueue.poll(waitMillis, TimeUnit.MILLISECONDS);
+            if (rBytes == WAKEUP_MARKER) {
+                sendEmptyResponse(exchange, 200);
+                return;
+            }
             if (null != rBytes) {
                 List<byte[]> bytesList = new LinkedList<>();
                 bytesList.add(rBytes);
@@ -108,6 +143,7 @@ public class RPostClientSessionService extends ClientSessionService {
         }
 
         private void receiveBytes(HttpExchange exchange) throws IOException {
+            ensureInitialized();
             byte[] bytes;
             try (InputStream is = exchange.getRequestBody()) {
                 bytes = is.readAllBytes();
@@ -118,10 +154,54 @@ public class RPostClientSessionService extends ClientSessionService {
                     receiveServerBytes(sub);
                 } catch (Exception e) {
                     log.warn("接收字节异常", e);
-                    exit();
+                    transportDisconnected("rpost receive err:" + e.getMessage());
+                    throw new IOException(e);
                 }
             }
             sendEmptyResponse(exchange, 200);
+        }
+    }
+
+    private void touchTransport() {
+        ensureInitialized();
+        lastTransportActivityTime = System.currentTimeMillis();
+        if (transportConnected.compareAndSet(false, true)) {
+            markTransportReady("rpost");
+            Cb cb = connectionCb;
+            if (cb != null) {
+                cb.end(null);
+            }
+        }
+    }
+
+    private void startTransportWatchdog() {
+        Thread.startVirtualThread(() -> {
+            while (running) {
+                try {
+                    Thread.sleep(Math.max(1000L, inactivityTimeoutMillis / 2));
+                } catch (InterruptedException ignored) {
+                }
+                if (!running) {
+                    return;
+                }
+                long last = lastTransportActivityTime;
+                if (last == 0) {
+                    continue;
+                }
+                if (transportConnected.get() && System.currentTimeMillis() - last > inactivityTimeoutMillis
+                        && transportConnected.compareAndSet(true, false)) {
+                    transportDisconnected("rpost inactivity timeout");
+                }
+            }
+        });
+    }
+
+    private synchronized void ensureInitialized() {
+        if (sendQueue == null) {
+            sendQueue = new LinkedBlockingQueue<>();
+        }
+        if (transportConnected == null) {
+            transportConnected = new AtomicBoolean();
         }
     }
 

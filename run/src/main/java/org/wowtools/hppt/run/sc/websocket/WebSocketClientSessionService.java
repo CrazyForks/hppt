@@ -4,6 +4,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.framing.PingFrame;
 import org.java_websocket.handshake.ServerHandshake;
+import org.wowtools.hppt.common.util.IoThreadUtil;
+import org.wowtools.hppt.common.util.ReconnectBackoff;
 import org.wowtools.hppt.run.sc.common.ClientSessionService;
 import org.wowtools.hppt.run.sc.pojo.ScConfig;
 
@@ -21,7 +23,6 @@ import java.nio.ByteBuffer;
 public class WebSocketClientSessionService extends ClientSessionService {
 
     private WebSocketClient wsClient;
-    private volatile boolean opened = false;
 
     public WebSocketClientSessionService(ScConfig config) throws Exception {
         super(config);
@@ -30,51 +31,83 @@ public class WebSocketClientSessionService extends ClientSessionService {
     @Override
     public void connectToServer(ScConfig config, Cb cb) throws Exception {
         String url = config.websocket.serverUrl + "/s";
-        wsClient = new WebSocketClient(URI.create(url)) {
-            @Override
-            public void onOpen(ServerHandshake handshake) {
-                if (!opened) {
-                    opened = true;
-                    cb.end(null);
-                }
-            }
+        ReconnectBackoff backoff = new ReconnectBackoff(config.transportReconnectBaseDelayMillis,
+                config.transportReconnectMaxDelayMillis, config.transportReconnectJitterMillis);
+        IoThreadUtil.startIoThread(() -> {
+            while (running) {
+                final String[] disconnectReason = {"websocket closed"};
+                WebSocketClient currentClient = new WebSocketClient(URI.create(url)) {
+                    @Override
+                    public void onOpen(ServerHandshake handshake) {
+                        log.info("ws opened {}", url);
+                    }
 
-            @Override
-            public void onMessage(ByteBuffer bytes) {
+                    @Override
+                    public void onMessage(ByteBuffer bytes) {
+                        try {
+                            byte[] data = new byte[bytes.remaining()];
+                            bytes.get(data);
+                            receiveServerBytes(data);
+                        } catch (Exception e) {
+                            log.warn("receiveServerBytes err", e);
+                            disconnectReason[0] = "receiveServerBytes err:" + e.getMessage();
+                            close();
+                        }
+                    }
+
+                    @Override
+                    public void onMessage(String message) {
+                        //只使用二进制消息，忽略文本消息
+                    }
+
+                    @Override
+                    public void onClose(int code, String reason, boolean remote) {
+                        disconnectReason[0] = "ws closed code=" + code + " reason=" + reason + " remote=" + remote;
+                        log.info("{}", disconnectReason[0]);
+                    }
+
+                    @Override
+                    public void onError(Exception ex) {
+                        disconnectReason[0] = "ws error:" + ex.getMessage();
+                        if (running) {
+                            log.warn("ws error", ex);
+                        }
+                    }
+                };
+                currentClient.setConnectionLostTimeout(0);
                 try {
-                    byte[] data = new byte[bytes.remaining()];
-                    bytes.get(data);
-                    receiveServerBytes(data);
+                    if (!currentClient.connectBlocking()) {
+                        disconnectReason[0] = "ws connectBlocking false";
+                    } else {
+                        wsClient = currentClient;
+                        markTransportReady("websocket");
+                        backoff.reset();
+                        cb.end(null);
+                        while (running && currentClient.isOpen()) {
+                            try {
+                                Thread.sleep(200);
+                            } catch (InterruptedException ignored) {
+                            }
+                        }
+                    }
                 } catch (Exception e) {
-                    log.warn("receiveServerBytes err", e);
-                    exit();
+                    disconnectReason[0] = "ws client err:" + e.getMessage();
+                    if (running) {
+                        log.warn("ws connect err", e);
+                    }
+                } finally {
+                    closeClient(currentClient);
                 }
-            }
-
-            @Override
-            public void onMessage(String message) {
-                //只使用二进制消息，忽略文本消息
-            }
-
-            @Override
-            public void onClose(int code, String reason, boolean remote) {
-                log.info("ws closed code={} reason={} remote={}", code, reason, remote);
-                exit();
-            }
-
-            @Override
-            public void onError(Exception ex) {
-                log.warn("ws error", ex);
-                if (!opened) {
-                    opened = true;
-                    cb.end(ex);
-                } else {
-                    exit();
+                if (!running) {
+                    return;
                 }
+                long delayMillis = backoff.nextDelayMillis();
+                transportDisconnected(disconnectReason[0]);
+                recordTransportReconnect("websocket", disconnectReason[0],
+                        backoff.getConsecutiveFailures(), delayMillis);
+                sleepForReconnect(delayMillis);
             }
-        };
-        wsClient.setConnectionLostTimeout(0);
-        wsClient.connect();
+        }, "hppt-io-ws-client");
 
         //启动ping线程
         long pingInterval = config.websocket.pingInterval;
@@ -87,12 +120,13 @@ public class WebSocketClientSessionService extends ClientSessionService {
                         break;
                     }
                     try {
-                        if (running && wsClient != null && wsClient.isOpen()) {
-                            wsClient.sendFrame(new PingFrame());
+                        WebSocketClient currentClient = wsClient;
+                        if (running && currentClient != null && currentClient.isOpen()) {
+                            currentClient.sendFrame(new PingFrame());
                         }
                     } catch (Exception e) {
                         log.warn("ping err", e);
-                        exit();
+                        closeClient(wsClient);
                     }
                 }
             });
@@ -102,12 +136,13 @@ public class WebSocketClientSessionService extends ClientSessionService {
     @Override
     public void sendBytesToServer(byte[] bytes) {
         try {
-            if (wsClient != null && wsClient.isOpen()) {
-                wsClient.send(bytes);
+            WebSocketClient currentClient = wsClient;
+            if (currentClient != null && currentClient.isOpen()) {
+                currentClient.sendDirect(bytes);
             }
         } catch (Exception e) {
             log.warn("sendBytesToServer err", e);
-            exit();
+            closeClient(wsClient);
         }
     }
 
@@ -115,6 +150,19 @@ public class WebSocketClientSessionService extends ClientSessionService {
     protected void doClose() throws Exception {
         if (null != wsClient) {
             wsClient.close();
+        }
+    }
+
+    private void closeClient(WebSocketClient currentClient) {
+        if (currentClient == null) {
+            return;
+        }
+        try {
+            currentClient.close();
+        } catch (Exception ignored) {
+        }
+        if (wsClient == currentClient) {
+            wsClient = null;
         }
     }
 }

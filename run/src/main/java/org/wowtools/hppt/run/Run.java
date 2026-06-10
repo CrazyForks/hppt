@@ -19,13 +19,17 @@ public class Run {
     public static void main(String[] args) throws Exception {
         System.setProperty("logFileName", args.length > 0 ? String.join("-", args).replace(".", "_") : "hppt");
         try {
-            LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
             File externalConfigFile = new File(ResourcesReader.getRootPath(Run.class) + "/logback.xml");
-            JoranConfigurator configurator = new JoranConfigurator();
-            configurator.setContext(context);
-            context.reset();
-            configurator.doConfigure(externalConfigFile);
-            StatusPrinter.printInCaseOfErrorsOrWarnings(context);
+            if (externalConfigFile.isFile()) {
+                LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
+                JoranConfigurator configurator = new JoranConfigurator();
+                configurator.setContext(context);
+                context.reset();
+                configurator.doConfigure(externalConfigFile);
+                StatusPrinter.printInCaseOfErrorsOrWarnings(context);
+            } else {
+                System.out.println("未加载到根目录下logback.xml文件，使用默认配置 " + externalConfigFile.getPath());
+            }
         } catch (Exception e) {
             System.out.println("未加载到根目录下logback.xml文件，使用默认配置 " + e.getMessage());
         }

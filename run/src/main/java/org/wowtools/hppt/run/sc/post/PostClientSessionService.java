@@ -5,6 +5,8 @@ import okhttp3.Response;
 import okhttp3.ResponseBody;
 import org.wowtools.hppt.common.util.BytesUtil;
 import org.wowtools.hppt.common.util.HttpUtil;
+import org.wowtools.hppt.common.util.IoThreadUtil;
+import org.wowtools.hppt.common.util.ReconnectBackoff;
 import org.wowtools.hppt.run.sc.common.ClientSessionService;
 import org.wowtools.hppt.run.sc.pojo.ScConfig;
 
@@ -15,9 +17,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * @author liuyu
@@ -26,32 +26,28 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j
 public class PostClientSessionService extends ClientSessionService {
 
-    private final BlockingQueue<byte[]> sendQueue = new LinkedBlockingQueue<>();
-    private final String sendUrl;
-    private final String replyUrl;
+    private BlockingQueue<byte[]> sendQueue;
+    private ReconnectBackoff backoff;
+    private AtomicBoolean transportConnected;
+    private volatile String cookie;
+    private volatile Cb connectionCb;
 
 
     public PostClientSessionService(ScConfig config) throws Exception {
         super(config);
-        String cookie = UUID.randomUUID().toString().replace("-", "");
-        sendUrl = config.post.serverUrl + "/s?c=" + cookie;
-        replyUrl = config.post.serverUrl + "/r?c=" + cookie;
     }
 
 
     @Override
     public void connectToServer(ScConfig config, Cb cb) {
-        startSendThread((e) -> {
-            startReplyThread();
-            cb.end(e);
-        });
+        ensureInitialized();
+        connectionCb = cb;
+        startSendThread();
+        startReplyThread();
     }
 
-    private void startSendThread(Cb cb) {
-        Thread.startVirtualThread(() -> {
-            //等待初始化完成
-            cb.end(null);
-            //起一个while循环不断发送数据
+    private void startSendThread() {
+        IoThreadUtil.startIoThread(() -> {
             final long sendSleepTime = config.post.sendSleepTime;
             while (running) {
                 try {
@@ -68,12 +64,15 @@ public class PostClientSessionService extends ClientSessionService {
                     }
                     sendQueue.drainTo(bytesList);
                     sendBytes = BytesUtil.bytesCollection2PbBytes(bytesList);
+                    String sendUrl = currentSendUrl();
                     if (log.isDebugEnabled()) {
                         long t = System.currentTimeMillis();
                         try (Response r = HttpUtil.doPost(sendUrl, sendBytes)) {
+                            assertSuccessResponse(r, "post send");
                             assert r.body() != null;
                             byte[] rBytes = r.body().bytes();
                             if (rBytes.length == 0) {
+                                markRequestSuccess();
                                 log.debug("SendThread 发送完成,cost {}", System.currentTimeMillis() - t);
                             } else {
                                 throw new RuntimeException("异常的响应值" + new String(rBytes, StandardCharsets.UTF_8));
@@ -81,9 +80,11 @@ public class PostClientSessionService extends ClientSessionService {
                         }
                     } else {
                         try (Response r = HttpUtil.doPost(sendUrl, sendBytes)) {
+                            assertSuccessResponse(r, "post send");
                             assert r.body() != null;
                             byte[] rBytes = r.body().bytes();
                             if (rBytes.length == 0) {
+                                markRequestSuccess();
                                 log.debug("SendThread 发送完成");
                             } else {
                                 throw new RuntimeException("异常的响应值" + new String(rBytes, StandardCharsets.UTF_8));
@@ -92,68 +93,31 @@ public class PostClientSessionService extends ClientSessionService {
                     }
 
                 } catch (Exception e) {
-                    log.warn("SendThread异常", e);
-                    exit();
-                }
-            }
-        });
-    }
-
-    private final ReentrantLock replyLock = new ReentrantLock();
-    private final Condition replyCondition = replyLock.newCondition();
-
-    private void startReplyThread() {
-        Thread.startVirtualThread(() -> {
-            while (null == sendUrl) {
-                log.info("wait url init");
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException e) {
-                }
-            }
-            boolean empty = false;
-            final long sendSleepTime = config.post.sendSleepTime;
-            while (running) {
-                //检测是否需要挂起接收线程
-                if (empty && notUsed()) {
-                    log.info("无客户端,挂起接收线程");
-                    replyLock.lock();
-                    try {
-                        while (notUsed() && running) {
-                            try {
-                                replyCondition.await(10, TimeUnit.SECONDS);
-                            } catch (Exception e) {
-                            }
-                        }
-                    } finally {
-                        replyLock.unlock();
-                    }
-                    log.info("唤醒接收线程");
                     if (!running) {
-                        log.info("退出已停止ReplyThread");
                         return;
                     }
+                    log.warn("SendThread异常", e);
+                    handleTransportFailure("post send err:" + e.getMessage());
                 }
+            }
+        }, "hppt-io-post-send");
+    }
+
+    private void startReplyThread() {
+        IoThreadUtil.startIoThread(() -> {
+            final long sendSleepTime = config.post.sendSleepTime;
+            while (running) {
                 //发一个接收请求接数据
                 try {
                     byte[] responseBytes;
-                    if (log.isDebugEnabled()) {
-                        log.debug("ReplyThread 发起请求");
-                        long t = System.currentTimeMillis();
-                        try (Response response = HttpUtil.doPost(replyUrl, null)) {
-                            ResponseBody body = response.body();
-                            responseBytes = null == body ? null : body.bytes();
-                        }finally {
-                            log.debug("ReplyThread 请求完成,cost {}", System.currentTimeMillis() - t);
-                        }
-                    }else {
-                        try (Response response = HttpUtil.doPost(replyUrl, null)) {
-                            ResponseBody body = response.body();
-                            responseBytes = null == body ? null : body.bytes();
-                        }
+                    String replyUrl = currentReplyUrl();
+                    try (Response response = HttpUtil.doPost(replyUrl, null)) {
+                        assertSuccessResponse(response, "post reply");
+                        ResponseBody body = response.body();
+                        responseBytes = null == body ? null : body.bytes();
+                        markRequestSuccess();
                     }
                     if (null != responseBytes && responseBytes.length > 0) {
-                        log.debug("收到服务端响应字节数 {}", responseBytes.length);
                         Collection<byte[]> bytesList;
                         try {
                             bytesList = BytesUtil.pbBytes2BytesList(responseBytes).getBytes();
@@ -164,13 +128,13 @@ public class PostClientSessionService extends ClientSessionService {
                         for (byte[] bytes : bytesList) {
                             receiveServerBytes(bytes);
                         }
-                        empty = bytesList.isEmpty();
-                    } else {
-                        empty = true;
                     }
                 } catch (Exception e) {
+                    if (!running) {
+                        return;
+                    }
                     log.warn("ReplyThread异常", e);
-                    exit();
+                    handleTransportFailure("post reply err:" + e.getMessage());
                 }
                 //按需做等待
                 if (sendSleepTime > 0) {
@@ -181,33 +145,81 @@ public class PostClientSessionService extends ClientSessionService {
                     }
                 }
             }
-        });
+        }, "hppt-io-post-reply");
     }
-
 
     @Override
     public void sendBytesToServer(byte[] bytes) {
+        ensureInitialized();
         sendQueue.add(bytes);
     }
 
     @Override
-    protected void newConnected() {
-        replyLock.lock();
-        try {
-            replyCondition.signal();
-        } finally {
-            replyLock.unlock();
-        }
+    public void exit() {
+        exit("manual exit");
     }
 
     @Override
-    public void exit() {
-        super.exit();
-        replyLock.lock();
-        try {
-            replyCondition.signal();
-        } finally {
-            replyLock.unlock();
+    protected void onTransportDisconnected(String reason) {
+        ensureInitialized();
+        sendQueue.clear();
+        cookie = newCookie();
+    }
+
+    private void markRequestSuccess() {
+        ensureInitialized();
+        if (transportConnected.compareAndSet(false, true)) {
+            backoff.reset();
+            markTransportReady("post");
+            Cb cb = connectionCb;
+            if (cb != null) {
+                cb.end(null);
+            }
+        }
+    }
+
+    private void handleTransportFailure(String reason) {
+        ensureInitialized();
+        boolean firstDisconnect = transportConnected.getAndSet(false);
+        if (firstDisconnect) {
+            transportDisconnected(reason);
+        }
+        long delayMillis = backoff.nextDelayMillis();
+        recordTransportReconnect("post", reason, backoff.getConsecutiveFailures(), delayMillis);
+        sleepForReconnect(delayMillis);
+    }
+
+    private String currentSendUrl() {
+        return config.post.serverUrl + "/s?c=" + cookie;
+    }
+
+    private String currentReplyUrl() {
+        return config.post.serverUrl + "/r?c=" + cookie;
+    }
+
+    private static void assertSuccessResponse(Response response, String type) {
+        if (!response.isSuccessful()) {
+            throw new RuntimeException(type + " http code " + response.code());
+        }
+    }
+
+    private static String newCookie() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private synchronized void ensureInitialized() {
+        if (sendQueue == null) {
+            sendQueue = new LinkedBlockingQueue<>();
+        }
+        if (backoff == null) {
+            backoff = new ReconnectBackoff(config.transportReconnectBaseDelayMillis,
+                    config.transportReconnectMaxDelayMillis, config.transportReconnectJitterMillis);
+        }
+        if (transportConnected == null) {
+            transportConnected = new AtomicBoolean();
+        }
+        if (cookie == null || cookie.isEmpty()) {
+            cookie = newCookie();
         }
     }
 }

@@ -9,6 +9,11 @@ import org.wowtools.hppt.run.ss.pojo.SsConfig;
 
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.ServerSocketChannel;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * WebSocket协议服务端 - Java-WebSocket实现
@@ -28,7 +33,12 @@ public class WebsocketServerSessionService extends ServerSessionService<WebSocke
 
     @Override
     protected void init(SsConfig ssConfig) throws Exception {
-        server = new WebSocketServer(new InetSocketAddress(ssConfig.port)) {
+        CountDownLatch startLatch = new CountDownLatch(1);
+        AtomicBoolean started = new AtomicBoolean(false);
+        AtomicReference<Exception> startErr = new AtomicReference<>();
+        ServerSocketChannel serverChannel = ServerSocketChannel.open();
+        serverChannel.bind(new InetSocketAddress(ssConfig.port));
+        server = new WebSocketServer(serverChannel) {
             @Override
             public void onOpen(WebSocket conn, ClientHandshake handshake) {
                 //连接建立
@@ -59,6 +69,10 @@ public class WebsocketServerSessionService extends ServerSessionService<WebSocke
             @Override
             public void onError(WebSocket conn, Exception ex) {
                 log.warn("ws server error", ex);
+                if (!started.get()) {
+                    startErr.compareAndSet(null, ex);
+                    startLatch.countDown();
+                }
                 if (conn != null) {
                     removeCtx(conn);
                 }
@@ -66,11 +80,22 @@ public class WebsocketServerSessionService extends ServerSessionService<WebSocke
 
             @Override
             public void onStart() {
+                started.set(true);
+                startLatch.countDown();
                 log.info("ws server started on port {}", ssConfig.port);
             }
         };
         server.setConnectionLostTimeout(0);
         server.start();
+        if (!startLatch.await(5, TimeUnit.SECONDS)) {
+            server.stop();
+            throw new IllegalStateException("websocket server start timeout, port " + ssConfig.port);
+        }
+        Exception e = startErr.get();
+        if (e != null) {
+            server.stop();
+            throw e;
+        }
     }
 
     @Override

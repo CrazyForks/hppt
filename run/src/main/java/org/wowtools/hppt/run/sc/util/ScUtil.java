@@ -35,6 +35,10 @@ public class ScUtil {
                 boolean res = clientSessionManager.bindPort(localHost, forward.localPort);
                 log.info("bind port {} {} -> {}:{}", res ? "success" : "fail",
                         forward.localPort, forward.remoteHost, forward.remotePort);
+                if (!res) {
+                    clientSessionManager.close();
+                    throw new IllegalStateException("bind local forward port failed:" + forward.localPort);
+                }
             }
         }
         return clientSessionManager;

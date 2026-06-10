@@ -2,6 +2,8 @@ package org.wowtools.hppt.run.ss.rhppt;
 
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.util.FrameIo;
+import org.wowtools.hppt.common.util.IoThreadUtil;
+import org.wowtools.hppt.common.util.ReconnectBackoff;
 import org.wowtools.hppt.run.ss.common.ServerSessionService;
 import org.wowtools.hppt.run.ss.pojo.SsConfig;
 
@@ -21,6 +23,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public class RHpptServerSessionService extends ServerSessionService<Socket> {
 
     private volatile Socket socket;
+    private volatile OutputStream out;
     private final ReentrantLock writeLock = new ReentrantLock();
     private int lengthFieldLength;
 
@@ -31,32 +34,53 @@ public class RHpptServerSessionService extends ServerSessionService<Socket> {
     @Override
     protected void init(SsConfig ssConfig) throws Exception {
         lengthFieldLength = ssConfig.rhppt.lengthFieldLength;
-        socket = new Socket(ssConfig.rhppt.host, ssConfig.rhppt.port);
-        socket.setTcpNoDelay(true);
-        Thread.startVirtualThread(() -> {
-            try {
-                InputStream in = socket.getInputStream();
-                while (running) {
-                    byte[] frame = FrameIo.readFrame(in, lengthFieldLength);
-                    if (frame == null) {
-                        break;
+        ReconnectBackoff backoff = new ReconnectBackoff(ssConfig.transportReconnectBaseDelayMillis,
+                ssConfig.transportReconnectMaxDelayMillis, ssConfig.transportReconnectJitterMillis);
+        IoThreadUtil.startIoThread(() -> {
+            while (running) {
+                Socket currentSocket = null;
+                String disconnectReason = "rhppt connection closed";
+                try {
+                    currentSocket = new Socket(ssConfig.rhppt.host, ssConfig.rhppt.port);
+                    currentSocket.setTcpNoDelay(true);
+                    socket = currentSocket;
+                    out = currentSocket.getOutputStream();
+                    markReady("rhppt transport");
+                    backoff.reset();
+                    InputStream in = currentSocket.getInputStream();
+                    while (running && socket == currentSocket) {
+                        byte[] frame = FrameIo.readFrame(in, lengthFieldLength);
+                        if (frame == null) {
+                            disconnectReason = "rhppt peer closed";
+                            break;
+                        }
+                        receiveClientBytes(currentSocket, frame);
                     }
-                    receiveClientBytes(socket, frame);
+                } catch (Exception e) {
+                    disconnectReason = "rhppt readLoop err:" + e.getMessage();
+                    if (running) {
+                        log.warn("rhppt readLoop err", e);
+                    }
+                } finally {
+                    if (currentSocket != null) {
+                        removeCtx(currentSocket);
+                        clearSocket(currentSocket);
+                    }
                 }
-            } catch (Exception e) {
-                if (running) {
-                    log.warn("rhppt readLoop err", e);
+                if (!running) {
+                    return;
                 }
-            } finally {
-                exit("rhppt connection closed");
+                long delayMillis = backoff.nextDelayMillis();
+                transportDisconnected(disconnectReason);
+                recordTransportReconnect("rhppt", disconnectReason, backoff.getConsecutiveFailures(), delayMillis);
+                sleepForReconnect(delayMillis);
             }
-        });
+        }, "hppt-io-server-connect");
     }
 
     @Override
     protected void sendBytesToClient(Socket socket, byte[] bytes) {
         try {
-            OutputStream out = socket.getOutputStream();
             writeLock.lock();
             try {
                 FrameIo.writeFrame(out, bytes, lengthFieldLength);
@@ -65,7 +89,7 @@ public class RHpptServerSessionService extends ServerSessionService<Socket> {
             }
         } catch (Exception e) {
             log.warn("sendBytesToClient err", e);
-            exit("sendBytesToClient err:" + e.getMessage());
+            clearSocket(socket);
         }
     }
 
@@ -82,6 +106,20 @@ public class RHpptServerSessionService extends ServerSessionService<Socket> {
             }
         } catch (Exception e) {
             log.warn("socket.close() err", e);
+        }
+    }
+
+    private void clearSocket(Socket currentSocket) {
+        if (currentSocket == null) {
+            return;
+        }
+        try {
+            currentSocket.close();
+        } catch (Exception ignored) {
+        }
+        if (socket == currentSocket) {
+            socket = null;
+            out = null;
         }
     }
 }

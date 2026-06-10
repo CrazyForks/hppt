@@ -85,7 +85,18 @@ server {
     ...
 ```
 
-随后，访问`http://111.222.33.44:80/xxx/` 能看到“error 404”字样即证明服务端部署成功。
+说明：
+
+- `post` 协议的服务端不是普通网页服务，只接受形如 `POST /s?c=...` 和 `POST /r?c=...` 的协议请求
+- 因此直接用浏览器访问 `http://111.222.33.44:80/xxx/`，通常会看到 `404`
+- 如果你手工访问了协议路径但没有带 `c` 参数，例如 `/s` 或 `/r`，则会返回 `400`
+- 这里的关键不是返回码本身，而是 nginx 是否已经把 `/xxx/` 正确转发到了 hppt 服务；浏览器访问并不是 `post` 协议的功能验证方式
+
+注意：
+
+- `sc.yml` 中的 `post.serverUrl` 可以写成 `http://111.222.33.44:80/xxx`，前提是 nginx 需要把 `/xxx/` 重写回后端根路径 `/`
+- 本文示例中的 `proxy_pass http://localhost:20871/;` 末尾带 `/`，就是为了让客户端实际访问到后端的 `/s` 和 `/r`
+- 如果你不经过 nginx，而是直连服务端端口，那么 `serverUrl` 不应额外带路径前缀，应直接写成 `http://host:20871`
 
 2、自己笔记本上，新建一个hppt目录，拷贝hppt.jar 、sc.yml、logback.xml文件到此目录下:
 
@@ -204,7 +215,7 @@ hppt
 ```yaml
 # 通讯协议 客户端与服务端保持一致
 type: rhppt
-#服务http端口
+# 服务端监听端口
 port: 20871
 
 # 指向上一步启动的服务的ip和端口
@@ -237,6 +248,19 @@ cd hppt
 
 ## 更多配置
 [完整的配置文件说明](_doc/config.md)
+
+## 管理接口
+
+`ss` 服务端可选开启 RESTful 管理接口，用于健康检查、查看活跃客户端/session、重启当前业务 service、停止进程等运维操作。默认不开启；需要时可在 `ss.yml` 中配置 `management.port`：
+
+```yaml
+management:
+  host: 127.0.0.1
+  port: 19091
+  token: "change-me"
+```
+
+建议默认只监听 `127.0.0.1`，通过 SSH tunnel 或内网网关访问；如果监听非本机地址，必须配置 `token`。详细接口、鉴权和响应字段见 [_doc/management-api.md](_doc/management-api.md)。
 
 ## 示例3 编写自定义协议
 
@@ -289,7 +313,7 @@ public class ServerDemo extends ServerSessionService<T> {
     }
 
     //当本服务端关闭后，在此释放掉连接池等资源
-    protected void doClose() throws Exception {
+    protected void onExit() throws Exception {
     }
 }
 ```
@@ -374,20 +398,16 @@ forwards:
 
 ## 性能如何？
 
-使用hppt或websocket等长连接协议的话，本项目只是做了个转发和加解密等操作，性能损耗在5%以内，以下是示例2中scp命令拷贝一个186m的文件，连接原始端口和代理端口的耗时对比：
+本项目只做了转发和加解密操作，在网络成为瓶颈的实际场景中性能损耗很小。以下是通过代理下载一个331MB文件的测试对比（服务端带宽已限速，模拟真实网络环境）：
 
-```shell
-# 直连
-scp -P 22 jdk-21_linux-aarch64_bin.tar.gz   root@xxx:/xxx                                                                                                                          
-100%  186MB   7.5MB/s   00:25
-# 代理
-scp -P 10022 jdk-21_linux-aarch64_bin.tar.gz   root@xxx:/xxx                                                                                                                          
-100%  186MB   7.2MB/s   00:26
+| 协议 | 下载耗时 | 速度 | 损耗 |
+|------|---------|------|------|
+| 直连 | 83.2s | 4.00 MB/s | - |
+| HPPT | 84.1s | 3.96 MB/s | 1% |
+| WebSocket | 84.0s | 3.96 MB/s | 1% |
+| POST | 83.8s | 3.96 MB/s | 1% |
 
-```
-
-但如果是用http post作为传输协议的话，由于http本身短连接、带了很多请求头等无用信息之类的原因，损耗就比较大了，笔者在应用环境中测试甚至会达到30%左右的损耗。
-所以在性能敏感的场景，建议使用长连接协议，短连接协议仅在不关注性能或是环境不允许的情况下再使用。
+在带宽受限的真实网络环境中，三种协议的损耗都在1%左右。如果在性能敏感的场景，建议使用长连接协议(hppt/websocket)，POST等短连接协议仅在环境不允许长连接的情况下再使用。
 
 ## 安全性如何？
 

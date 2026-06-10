@@ -3,11 +3,14 @@ package org.wowtools.hppt.run.sc.common;
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.client.ClientSession;
 import org.wowtools.hppt.common.client.ClientSessionLifecycle;
+import org.wowtools.hppt.common.util.IoThreadUtil;
 import org.wowtools.hppt.run.sc.pojo.ScConfig;
 
+import java.util.Date;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -23,10 +26,13 @@ public abstract class ClientSessionService implements AutoCloseable {
     public final Receiver receiver;
     protected volatile boolean running = true;
     private volatile boolean exited = false;
+    private volatile String lastExitReason = "running";
+    private final AtomicLong lastReadyTime = new AtomicLong(-1L);
+    private final AtomicLong transportReconnectCount = new AtomicLong();
     private final ReentrantLock syncLock = new ReentrantLock();
     private final Condition syncCondition = syncLock.newCondition();
 
-    private final BlockingQueue<byte[]> receiveServerBytesQueue = new ArrayBlockingQueue<>(128);
+    private final BlockingQueue<byte[]> receiveServerBytesQueue;
 
     /**
      * 当一个事件结束时发起的回调
@@ -43,14 +49,10 @@ public abstract class ClientSessionService implements AutoCloseable {
 
     public ClientSessionService(ScConfig config) throws Exception {
         this.config = config;
-        if (!config.isRelay) {
-            receiver = new PortReceiver(config, this);
-            log.info("--- 普通模式");
-        } else {
-            receiver = new SsReceiver(config, this);
-            log.info("--- 中继模式");
-        }
-        Thread.startVirtualThread(() -> {
+        receiveServerBytesQueue = new ArrayBlockingQueue<>(config.receiveQueueSize);
+        receiver = new PortReceiver(config, this);
+        log.info("--- 普通模式 receiveQueueSize={}", config.receiveQueueSize);
+        IoThreadUtil.startIoThread(() -> {
             while (running) {
                 byte[] bytes;
                 try {
@@ -65,11 +67,11 @@ public abstract class ClientSessionService implements AutoCloseable {
                     receiver.receiveServerBytes(bytes);
                 } catch (Exception e) {
                     log.warn("receiver.receiveServerBytes err", e);
-                    exit();
+                    exit("receiver.receiveServerBytes err:" + e.getMessage());
                 }
             }
 
-        });
+        }, "hppt-io-sc-recv");
     }
 
 
@@ -95,9 +97,14 @@ public abstract class ClientSessionService implements AutoCloseable {
      * @throws Exception
      */
     public void receiveServerBytes(byte[] bytes) throws Exception {
+        int queueSize = receiveServerBytesQueue.size();
+        int capacity = config.receiveQueueSize;
+        if (queueSize > capacity / 2 && queueSize % 50 == 0) {
+            log.warn("receiveServerBytesQueue 高水位 {}/{} bytes={}", queueSize, capacity, bytes.length);
+        }
         if (!receiveServerBytesQueue.offer(bytes, 30, TimeUnit.SECONDS)) {
-            log.warn("缓冲区堆积过多数据，强制退出");
-            exit();
+            log.warn("缓冲区堆积过多数据 {}/{}, 强制退出", queueSize, capacity);
+            exit("receiveServerBytesQueue overflow");
         }
     }
 
@@ -105,12 +112,22 @@ public abstract class ClientSessionService implements AutoCloseable {
      * 当发生难以修复的异常等情况时，主动调用此方法结束当前服务，以便后续自动重启等操作
      */
     public void exit() {
+        exit("manual exit");
+    }
+
+    public void exit(String reason) {
         if (exited) {
             return;
         }
         exited = true;
+        lastExitReason = reason;
+        log.warn("ClientSessionService exit reason=[{}] service={} lastReadyAt={}", reason, this,
+                formatTs(lastReadyTime.get()));
         running = false;
-        receiver.exit();
+        Receiver currentReceiver = receiver;
+        if (currentReceiver != null) {
+            currentReceiver.exit();
+        }
         try {
             doClose();
         } catch (Exception e) {
@@ -126,7 +143,7 @@ public abstract class ClientSessionService implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        exit();
+        exit("close()");
     }
 
     /**
@@ -180,6 +197,57 @@ public abstract class ClientSessionService implements AutoCloseable {
 
     protected void newConnected() {
 
+    }
+
+    protected void markTransportReady(String type) {
+        long now = System.currentTimeMillis();
+        lastReadyTime.set(now);
+        log.info("传输层已就绪 type={} readyAt={}", type, formatTs(now));
+    }
+
+    protected void transportDisconnected(String reason) {
+        onTransportDisconnected(reason);
+        receiver.transportDisconnected(reason);
+    }
+
+    protected void recordTransportReconnect(String type, String reason, int attempt, long delayMillis) {
+        transportReconnectCount.incrementAndGet();
+        log.warn("传输层断开 type={} attempt={} nextDelay={}ms reason={}",
+                type, attempt, delayMillis, reason);
+    }
+
+    protected void onTransportDisconnected(String reason) {
+
+    }
+
+    protected void sleepForReconnect(long delayMillis) {
+        try {
+            Thread.sleep(delayMillis);
+        } catch (InterruptedException ignored) {
+        }
+    }
+
+    protected boolean handleHeartbeatTimeout() {
+        return false;
+    }
+
+    public String getLastExitReason() {
+        return lastExitReason;
+    }
+
+    public long getLastReadyTime() {
+        return lastReadyTime.get();
+    }
+
+    public long getTransportReconnectCount() {
+        return transportReconnectCount.get();
+    }
+
+    private static String formatTs(long ts) {
+        if (ts <= 0) {
+            return "never";
+        }
+        return new Date(ts).toString();
     }
 
     /**

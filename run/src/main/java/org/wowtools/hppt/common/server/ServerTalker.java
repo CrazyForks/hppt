@@ -4,7 +4,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.pojo.SendAbleSessionBytes;
 import org.wowtools.hppt.common.pojo.SessionBytes;
 import org.wowtools.hppt.common.pojo.TalkMessage;
-import org.wowtools.hppt.common.util.BufferPool;
 import org.wowtools.hppt.common.util.CommonConfig;
 import org.wowtools.hppt.common.util.Constant;
 import org.wowtools.hppt.common.util.DebugConfig;
@@ -12,6 +11,8 @@ import org.wowtools.hppt.common.util.DebugConfig;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * @author liuyu
@@ -19,6 +20,8 @@ import java.util.Map;
  */
 @Slf4j
 public class ServerTalker {
+    private static final long WAIT_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(3);
+    private static final long WAIT_POLL_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(50);
 
 
     //接收客户端发来的字节并做相应处理
@@ -120,18 +123,14 @@ public class ServerTalker {
     //生成向客户端回复的消息
     public static void replyToClient(CommonConfig config, ServerSessionManager serverSessionManager,
                                      LoginClientService.Client client, long maxReturnBodySize, boolean blocked, Replier replier) throws Exception {
-        boolean empty = true;
-        /* 取消息 */
-
-        //取命令
-        List<String> fetchCommands = client.fetchCommands();
-        if (null != fetchCommands && !fetchCommands.isEmpty()) {
-            empty = false;
-            blocked = false;
+        if (blocked && !client.hasPendingReply()) {
+            waitForClientReply(client);
         }
 
-        //取bytes
-        List<SendAbleSessionBytes> fetchBytes = blocked ? client.fetchBytesBlocked(maxReturnBodySize) : client.fetchBytes(maxReturnBodySize);
+        List<String> fetchCommands = client.fetchCommands();
+        List<SendAbleSessionBytes> fetchBytes = client.fetchBytes(maxReturnBodySize);
+        boolean empty = (null == fetchCommands || fetchCommands.isEmpty())
+                && (null == fetchBytes || fetchBytes.isEmpty());
         List<SessionBytes> sessionBytes = null;
         if (null != fetchBytes && !fetchBytes.isEmpty()) {
             if (DebugConfig.OpenSerialNumber) {
@@ -173,7 +172,11 @@ public class ServerTalker {
 
         if (null != fetchBytes) {
             for (SendAbleSessionBytes fetchByte : fetchBytes) {
-                sendAbleSessionBytesResultQueue.add(new SendAbleSessionBytesResult(success, fetchByte.callBack()));
+                try {
+                    fetchByte.callBack().cb(success);
+                } catch (Exception e) {
+                    log.warn("callback err", e);
+                }
             }
         }
 
@@ -182,45 +185,18 @@ public class ServerTalker {
         }
     }
 
-    //处理SendAbleSessionBytes的回调
-    private record SendAbleSessionBytesResult(boolean success, SendAbleSessionBytes.CallBack callBack) {
-    }
-
-    @Slf4j
-    private record CbRunnable(SendAbleSessionBytesResult sendAbleSessionBytesResult) implements Runnable {
-
-        @Override
-        public void run() {
-            try {
-                sendAbleSessionBytesResult.callBack.cb(sendAbleSessionBytesResult.success);
-            } catch (Exception e) {
-                log.warn("CbRunnable err", e);
+    private static void waitForClientReply(LoginClientService.Client client) {
+        long deadline = System.nanoTime() + WAIT_TIMEOUT_NANOS;
+        while (!client.hasPendingReply()) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                return;
             }
+            LockSupport.parkNanos(Math.min(remaining, WAIT_POLL_INTERVAL_NANOS));
         }
     }
 
-    private static final BufferPool<SendAbleSessionBytesResult> sendAbleSessionBytesResultQueue
-            = new BufferPool<>("ServerTalker.sendAbleSessionBytesResultQueue");
-    private static volatile boolean dispatcherRunning = true;
-
-    static {
-        Thread.startVirtualThread(() -> {
-            while (dispatcherRunning) {
-                try {
-                    SendAbleSessionBytesResult sendAbleSessionBytesResult = sendAbleSessionBytesResultQueue.take();
-                    CbRunnable cbRunnable = new CbRunnable(sendAbleSessionBytesResult);
-                    Thread.startVirtualThread(cbRunnable);
-                } catch (Exception e) {
-                    if (e.getCause() instanceof InterruptedException) {
-                        break;
-                    }
-                    log.warn("sendAbleSessionBytesResultQueue.take err", e);
-                }
-            }
-        });
-    }
-
     public static void stopDispatcher() {
-        dispatcherRunning = false;
+        // no-op, callbacks now run inline
     }
 }

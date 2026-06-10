@@ -5,10 +5,14 @@ import org.wowtools.hppt.common.server.LoginClientService;
 import org.wowtools.hppt.common.server.ServerSessionManager;
 import org.wowtools.hppt.common.server.ServerTalker;
 import org.wowtools.hppt.common.util.GridAesCipherUtil;
+import org.wowtools.hppt.common.util.IoThreadUtil;
 import org.wowtools.hppt.run.ss.pojo.SsConfig;
 import org.wowtools.hppt.run.ss.util.SsUtil;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -139,7 +143,7 @@ final class PortReceiver<CTX> extends Receiver<CTX> {
     private void startSendThread(ClientCell cell) {
         LoginClientService.Client client = cell.client;
         //回复消息到客户端的线程
-        Thread.startVirtualThread(() -> {
+        IoThreadUtil.startIoThread(() -> {
             ServerTalker.Replier replier = (bytes) -> {
                 try {
                     if (null != bytes) {
@@ -175,9 +179,9 @@ final class PortReceiver<CTX> extends Receiver<CTX> {
                 }
             }
             log.info("回复消息线程结束 {} {}", cell.client.clientId, cell.ctx);
-        });
+        }, "hppt-io-ss-reply-" + client.clientId);
         //接收客户端消息的线程
-        Thread.startVirtualThread(() -> {
+        IoThreadUtil.startIoThread(() -> {
             while (cell.running) {
                 byte[] bytes;
                 try {
@@ -214,13 +218,14 @@ final class PortReceiver<CTX> extends Receiver<CTX> {
                 }
             }
             log.info("接收消息线程结束 {} {}", cell.client.clientId, cell.ctx);
-        });
+        }, "hppt-io-ss-recv-" + client.clientId);
     }
 
     public void removeCtx(CTX ctx) {
         ClientCell cell = ctxClientCellMap.remove(ctx);
         if (null != cell) {
             cell.running = false;
+            serverSessionManager.disposeSessionsByClientId(cell.client.clientId, "传输连接断开");
         }
     }
 
@@ -232,5 +237,43 @@ final class PortReceiver<CTX> extends Receiver<CTX> {
     @Override
     public long getLastHeartbeatTime() {
         return serverSessionManager.getLastHeartbeatTime();
+    }
+
+    @Override
+    public boolean hasActiveClient() {
+        return !ctxClientCellMap.isEmpty();
+    }
+
+    @Override
+    public int getActiveClientCount() {
+        return ctxClientCellMap.size();
+    }
+
+    @Override
+    public int getActiveSessionCount() {
+        return serverSessionManager.getSessionCount();
+    }
+
+    @Override
+    public List<Map<String, Object>> snapshotClients() {
+        List<Map<String, Object>> res = new ArrayList<>();
+        ctxClientCellMap.forEach((ctx, cell) -> {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("clientId", cell.client.clientId);
+            item.put("running", cell.running);
+            item.put("active", cell.actived);
+            item.put("sessionCount", cell.client.getSessionCount());
+            item.put("pendingCommandCount", cell.client.getPendingCommandCount());
+            item.put("pendingSessionBytesCount", cell.client.getPendingSessionBytesCount());
+            item.put("pendingReceiveBytesCount", cell.client.getPendingReceiveBytesCount());
+            item.put("ctx", String.valueOf(ctx));
+            res.add(item);
+        });
+        return res;
+    }
+
+    @Override
+    public List<Map<String, Object>> snapshotSessions() {
+        return serverSessionManager.snapshotSessions();
     }
 }

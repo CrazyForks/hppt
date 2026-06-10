@@ -1,16 +1,16 @@
-## 示例1 通过http端口，hppt协议代理访问内部服务器SSH端口
+## 示例1 通过独立 TCP 端口，hppt 协议代理访问内部服务器 SSH 端口
 
 假设你有一个服务器集群，防火墙放行了端口20871(111.222.33.44:20871)，你想要访问集群中的应用服务器(192.168.0.2)的22端口，则可以按如下结构部署
 
 ![示例1](../img/hpptdemo.jpg)
 
-1、在集群中任一服务器上新建一个hppt目录，并上传hppt.jar、ss.yml、log4j2.xml文件到此目录下:
+1、在集群中任一服务器上新建一个hppt目录，并上传hppt.jar、ss.yml、logback.xml文件到此目录下:
 
 ```
 hppt
     - hppt.jar
     - ss.yml
-    - log4j2.xml
+    - logback.xml
 ```
 
 并调整ss.yml的配置信息:
@@ -38,13 +38,13 @@ cd hppt
 <jdk21_path>/bin/java -jar hppt.jar ss ss.yml
 ```
 
-2、自己笔记本上，新建一个hppt目录，拷贝hppt.jar、sc.yml、log4j2.xml文件到此目录下:
+2、自己笔记本上，新建一个hppt目录，拷贝hppt.jar、sc.yml、logback.xml文件到此目录下:
 
 ```
 hppt
     - hppt.jar 
     - sc.yml
-    - log4j2.xml
+    - logback.xml
 ```
 
 并调整sc.yml的配置信息:

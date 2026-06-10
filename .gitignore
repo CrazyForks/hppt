@@ -45,3 +45,9 @@ logs
 dependency-reduced-pom.xml
 
 /_localtest/src/
+
+.codex
+
+.claude/
+
+_localtest/

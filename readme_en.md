@@ -76,7 +76,18 @@ server {
 }
 ```
 
-Now, visiting `http://111.222.33.44:80/xxx/` and seeing "error 404" indicates the server is up.
+Notes:
+
+- The `post` protocol server is not a normal web page service. It only accepts protocol requests such as `POST /s?c=...` and `POST /r?c=...`.
+- Therefore, opening `http://111.222.33.44:80/xxx/` directly in a browser will usually return `404`.
+- If you manually access protocol paths like `/s` or `/r` without the `c` parameter, the server will return `400`.
+- The important part is not the exact status code, but whether nginx is correctly forwarding `/xxx/` to hppt. A browser request is not a real `post` protocol validation.
+
+Important:
+
+- In `sc.yml`, `post.serverUrl` may be `http://111.222.33.44:80/xxx` only if nginx rewrites `/xxx/` back to the backend root path `/`.
+- In this example, the trailing slash in `proxy_pass http://localhost:20871/;` is what makes the client ultimately reach backend paths like `/s` and `/r`.
+- If you connect directly to the hppt server port without nginx, do not add an extra path prefix; use `http://host:20871` directly.
 
 2. On your laptop, create a similar `hppt` directory with `hppt.jar`, `sc.yml`, and `logback.xml`:
 
@@ -115,7 +126,7 @@ cd hppt
 
 You can now SSH into the internal server from your laptop using `localhost:10022`.
 
-## Example 2: NAT Traversal via Public Relay Server
+## Example 2: NAT Traversal via Public Entry Server
 
 Suppose you have a desktop at home (SSH port 22) and a public VPS (IP: 111.222.33.44). You want to connect from your laptop at work to your desktop at home. Set up as follows:
 
@@ -196,8 +207,22 @@ cd hppt
 You can now SSH into your home desktop from work via `111.222.33.44:10022`.
 
 
-## more config
-[more config see this doc](_doc/config.md)
+## More Configuration
+
+See the [full configuration guide](_doc/config.md).
+
+## Management API
+
+The `ss` server can optionally expose a RESTful management API for health checks, active client/session inspection, restarting the current business service, and stopping the process. It is disabled by default. Enable it in `ss.yml` when needed:
+
+```yaml
+management:
+  host: 127.0.0.1
+  port: 19091
+  token: "change-me"
+```
+
+It is recommended to bind only to `127.0.0.1` and access it through an SSH tunnel or an internal gateway. If binding to a non-local address, `token` is required. See [_doc/management-api.md](_doc/management-api.md) for endpoint details, authentication, and response fields.
 
 ## Example 3: Custom Protocol Implementation (e.g., Kafka)
 
@@ -234,7 +259,7 @@ public class ServerDemo extends ServerSessionService<T> {
     public void init(SsConfig ssConfig) throws Exception {}
     protected void sendBytesToClient(T ctx, byte[] bytes) {}
     protected void closeCtx(T ctx) throws Exception {}
-    protected void doClose() throws Exception {}
+    protected void onExit() throws Exception {}
 }
 ```
 
@@ -313,20 +338,16 @@ forwards:
 
 ## How’s the performance?
 
-When using persistent connections like `hppt` or `WebSocket`, hppt incurs less than 5% overhead. Below is a file transfer comparison (186MB via `scp`):
+hppt only performs forwarding and encryption/decryption. In real-world scenarios where the network is the bottleneck, the overhead is minimal. Below is a benchmark downloading a 331MB file (server bandwidth throttled to simulate real network conditions):
 
-```shell
-# Direct
-scp -P 22 jdk-21_linux-aarch64_bin.tar.gz root@xxx:/xxx
-100%  186MB   7.5MB/s   00:25
+| Protocol | Download Time | Speed | Overhead |
+|----------|---------------|-------|----------|
+| Direct | 83.2s | 4.00 MB/s | - |
+| HPPT | 84.1s | 3.96 MB/s | 1% |
+| WebSocket | 84.0s | 3.96 MB/s | 1% |
+| POST | 83.8s | 3.96 MB/s | 1% |
 
-# Via hppt
-scp -P 10022 jdk-21_linux-aarch64_bin.tar.gz root@xxx:/xxx
-100%  186MB   7.2MB/s   00:26
-```
-
-If using HTTP POST (short connection), performance may degrade significantly (up to 30% in some cases).
-Use persistent protocols in performance-sensitive scenarios.
+In bandwidth-limited real network environments, all three protocols incur only ~1% overhead. Use persistent protocols (`hppt`/`WebSocket`) in performance-sensitive scenarios. POST is suitable only when persistent connections are not allowed by the environment.
 
 ## How about security?
 

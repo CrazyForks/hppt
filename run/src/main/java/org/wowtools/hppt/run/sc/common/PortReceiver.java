@@ -41,10 +41,12 @@ final class PortReceiver implements Receiver {
 
     private boolean firstLoginErr = true;
     private volatile boolean noLogin = true;
+    private final AtomicInteger transportGeneration = new AtomicInteger();
 
     private volatile boolean running = true;
     //服务端回复心跳包的时间
     private volatile long serverHeartbeatTime = System.currentTimeMillis();
+    private final long heartbeatTimeoutMillis;
 
     private final ClientTalker.CommandCallBack commandCallBack = (type, param) -> {
         if (Constant.ScCommands.Heartbeat == type) {
@@ -57,9 +59,11 @@ final class PortReceiver implements Receiver {
     public PortReceiver(ScConfig config, ClientSessionService clientSessionService) throws Exception {
         this.config = config;
         this.clientSessionService = clientSessionService;
+        heartbeatTimeoutMillis = config.heartbeatPeriod <= 0 ? Long.MAX_VALUE : config.heartbeatPeriod * 3;
         clientSessionManager = ScUtil.createClientSessionManager(config,
                 clientSessionService.buildClientSessionLifecycle(), buildClientBytesSender());
         buildSendThread().start();
+        checkSessionInit();
 
         //心跳检测
         if (config.heartbeatPeriod > 0) {
@@ -69,12 +73,23 @@ final class PortReceiver implements Receiver {
                 } catch (InterruptedException ignored) {
                 }
                 while (running) {
+                    if (noLogin) {
+                        try {
+                            Thread.sleep(config.heartbeatPeriod);
+                        } catch (InterruptedException ignored) {
+                        }
+                        continue;
+                    }
                     //发送心跳包
                     sendCommandQueue.add(Constant.SsCommands.Heartbeat + ":" + System.currentTimeMillis());
                     //检测服务端心跳回复
-                    if (System.currentTimeMillis() - serverHeartbeatTime > config.heartbeatPeriod * 1.5) {
+                    if (System.currentTimeMillis() - serverHeartbeatTime > heartbeatTimeoutMillis) {
                         log.warn("长期未收到服务端心跳，疑似故障，重启");
-                        clientSessionService.exit();
+                        if (clientSessionService.handleHeartbeatTimeout()) {
+                            serverHeartbeatTime = System.currentTimeMillis();
+                            continue;
+                        }
+                        clientSessionService.exit("heartbeat timeout");
                         break;
                     }
                     log.info("心跳检测正常");
@@ -89,38 +104,13 @@ final class PortReceiver implements Receiver {
 
         clientSessionService.connectToServer(config, (exceptionCb) -> {
             if (null != exceptionCb) {
-                log.warn("建立连接异常");
-                exit();
+                log.warn("建立连接异常", exceptionCb);
+                clientSessionService.exit("connect err:" + exceptionCb.getMessage());
+                return;
             }
-            log.info("连接建立完成");
-            Thread.startVirtualThread(() -> {
-                //休眠一下等待clientSessionService初始化完成，解决native下启动时可能得空指针问题
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-                //建立连接后，获取时间戳
-                clientSessionService.sendBytesToServer(GridAesCipherUtil.encrypt("dt".getBytes(StandardCharsets.UTF_8)));
-                //等待时间戳返回
-                int n = 0;
-                while (dt == 0 && clientSessionService.running) {
-                    try {
-                        Thread.sleep(100);
-                    } catch (InterruptedException e) {
-                        continue;
-                    }
-                    n++;
-                    if (n > 100) {
-                        //等超过10秒依然没有收到dt，重发一次
-                        clientSessionService.sendBytesToServer(GridAesCipherUtil.encrypt("dt".getBytes(StandardCharsets.UTF_8)));
-                        n = 0;
-                    }
-                }
-                //登录
-                sendLoginCommand();
-                checkSessionInit();
-            });
+            int generation = transportGeneration.incrementAndGet();
+            log.info("连接建立完成 generation={}", generation);
+            startHandshake(generation);
         });
     }
 
@@ -155,6 +145,7 @@ final class PortReceiver implements Receiver {
                     String code = cmd[1];
                     if ("0".equals(code)) {
                         noLogin = false;
+                        serverHeartbeatTime = System.currentTimeMillis();
                         log.info("登录成功");
                     } else if (firstLoginErr) {
                         firstLoginErr = false;
@@ -163,7 +154,7 @@ final class PortReceiver implements Receiver {
                         sendLoginCommand();
                     } else {
                         log.error("登录失败 {}", code);
-                        clientSessionService.exit();
+                        clientSessionService.exit("login failed:" + code);
                     }
                     break;
                 default:
@@ -176,13 +167,22 @@ final class PortReceiver implements Receiver {
 
     @Override
     public void closeClientSession(ClientSession clientSession) {
-        sendCommandQueue.add(String.valueOf(Constant.SsCommands.CloseSession) + clientSession.getSessionId());
+        if (!noLogin) {
+            sendCommandQueue.add(String.valueOf(Constant.SsCommands.CloseSession) + clientSession.getSessionId());
+        }
     }
 
     @Override
     public void exit() {
         running = false;
         clientSessionManager.close();
+    }
+
+    @Override
+    public void transportDisconnected(String reason) {
+        int generation = transportGeneration.incrementAndGet();
+        log.warn("传输连接断开，重置客户端状态 generation={} reason={}", generation, reason);
+        resetTransportState(reason);
     }
 
     @Override
@@ -194,6 +194,60 @@ final class PortReceiver implements Receiver {
         aesCipherUtil = new AesCipherUtil(config.clientPassword, System.currentTimeMillis() + dt);
         String loginCode = BytesUtil.bytes2base64(aesCipherUtil.encryptor.encrypt(config.clientPassword.getBytes(StandardCharsets.UTF_8)));
         clientSessionService.sendBytesToServer(GridAesCipherUtil.encrypt(("login " + config.clientUser + " " + loginCode).getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private void sendDtCommand() {
+        clientSessionService.sendBytesToServer(GridAesCipherUtil.encrypt("dt".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private void startHandshake(int generation) {
+        Thread.startVirtualThread(() -> {
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException ignored) {
+            }
+            if (!running || generation != transportGeneration.get()) {
+                return;
+            }
+            sendDtCommand();
+            int n = 0;
+            while (dt == 0 && clientSessionService.running && generation == transportGeneration.get()) {
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException ignored) {
+                }
+                n++;
+                if (n > 100) {
+                    sendDtCommand();
+                    n = 0;
+                }
+            }
+            if (!running || generation != transportGeneration.get() || dt == 0) {
+                return;
+            }
+            sendLoginCommand();
+        });
+    }
+
+    private void resetTransportState(String reason) {
+        serverHeartbeatTime = System.currentTimeMillis();
+        dt = 0;
+        aesCipherUtil = null;
+        noLogin = true;
+        firstLoginErr = true;
+        sendCommandQueue.clear();
+        sendBytesQueue.clear();
+        sessionIdCallBackMap.forEach((key, value) -> {
+            try {
+                value.socket.close();
+            } catch (Exception ignored) {
+            }
+        });
+        sessionIdCallBackMap.clear();
+        clientSessionManager.disposeAllSessions("传输连接重置:" + reason);
+        sendCommandQueue.clear();
+        sendBytesQueue.clear();
+        ClientTalker.clearPendingSessionBytes();
     }
 
     //起一个线程定时检测是否有SessionIdCallBack长期未得到响应，若是则说明连接故障，重启ClientSessionService

@@ -5,7 +5,10 @@ import org.wowtools.hppt.common.util.Constant;
 
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -110,11 +113,44 @@ public class ServerSessionManager implements AutoCloseable {
         return serverSessionMap.get(sessionId);
     }
 
+    public void disposeSessionsByClientId(String clientId, String type) {
+        Map<Integer, ServerSession> clientSessions = clientIdServerSessionMap.get(clientId);
+        if (clientSessions == null || clientSessions.isEmpty()) {
+            return;
+        }
+        List<ServerSession> sessions = new ArrayList<>(clientSessions.values());
+        for (ServerSession session : sessions) {
+            disposeServerSession(session, type);
+        }
+    }
+
     public long getLastHeartbeatTime() {
         return lastHeartbeatTime;
     }
 
     public void setLastHeartbeatTime(long lastHeartbeatTime) {
         this.lastHeartbeatTime = lastHeartbeatTime;
+    }
+
+    public int getSessionCount() {
+        return serverSessionMap.size();
+    }
+
+    public List<Map<String, Object>> snapshotSessions() {
+        List<Map<String, Object>> res = new ArrayList<>();
+        serverSessionMap.forEach((id, session) -> {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("sessionId", session.getSessionId());
+            item.put("clientId", session.getClient().clientId);
+            item.put("running", session.isRunning());
+            item.put("activeTime", session.getActiveTime());
+            item.put("targetAddress", session.getTargetAddress());
+            item.put("bytesFromTarget", session.getBytesFromTarget());
+            item.put("bytesToTarget", session.getBytesToTarget());
+            item.put("needCheckActive", session.isNeedCheckActive());
+            item.put("timeout", session.isTimeOut());
+            res.add(item);
+        });
+        return res;
     }
 }

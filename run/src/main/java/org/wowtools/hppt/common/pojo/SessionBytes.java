@@ -2,6 +2,7 @@ package org.wowtools.hppt.common.pojo;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.UnsafeByteOperations;
 import lombok.Getter;
 import org.wowtools.hppt.common.protobuf.ProtoMessage;
 import org.wowtools.hppt.common.util.DebugConfig;
@@ -73,7 +74,7 @@ public class SessionBytes {
 
     public ProtoMessage.BytesPb.Builder toProto() {
         ProtoMessage.BytesPb.Builder builder = ProtoMessage.BytesPb.newBuilder()
-                .setBytes(ByteString.copyFrom(bytes))
+                .setBytes(UnsafeByteOperations.unsafeWrap(bytes))
                 .setSessionId(sessionId);
         if (DebugConfig.OpenSerialNumber) {
             builder.setSerialNumber(serialNumber);

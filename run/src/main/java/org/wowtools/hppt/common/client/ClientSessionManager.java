@@ -3,6 +3,7 @@ package org.wowtools.hppt.common.client;
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.common.pojo.SessionBytes;
 import org.wowtools.hppt.common.util.DebugConfig;
+import org.wowtools.hppt.common.util.IoThreadUtil;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -58,7 +59,7 @@ public class ClientSessionManager implements AutoCloseable {
                 ss.bind(new InetSocketAddress(localHost, port));
             }
             serverSockets.add(ss);
-            Thread.startVirtualThread(() -> acceptLoop(ss, port));
+            IoThreadUtil.startIoThread(() -> acceptLoop(ss, port), "hppt-io-accept-" + port);
             log.debug("bindPort {} success", port);
             return true;
         } catch (Exception e) {
@@ -105,17 +106,27 @@ public class ClientSessionManager implements AutoCloseable {
     }
 
     private void startReadThread(ClientSession clientSession, int port) {
-        Thread.startVirtualThread(() -> {
+        IoThreadUtil.startIoThread(() -> {
+            long totalBytes = 0;
             try {
                 InputStream in = clientSession.getSocket().getInputStream();
-                byte[] buf = new byte[bufferSize > 0 ? bufferSize : 10240];
+                int bufSize = bufferSize > 0 ? bufferSize : 10240;
+                byte[] buf = new byte[bufSize];
                 while (clientSession.isRunning()) {
                     int n = in.read(buf);
                     if (n == -1) {
+                        log.info("用户Socket EOF sessionId={} bytesFromUser={}", clientSession.getSessionId(), totalBytes);
                         break;
                     }
-                    byte[] bytes = new byte[n];
-                    System.arraycopy(buf, 0, bytes, 0, n);
+                    totalBytes += n;
+                    byte[] bytes;
+                    if (n == buf.length) {
+                        bytes = buf;
+                        buf = new byte[bufSize];
+                    } else {
+                        bytes = new byte[n];
+                        System.arraycopy(buf, 0, bytes, 0, n);
+                    }
                     if (log.isDebugEnabled()) {
                         log.debug("ClientSession {} 收到用户端字节 {}", clientSession.getSessionId(), bytes.length);
                     }
@@ -132,12 +143,12 @@ public class ClientSessionManager implements AutoCloseable {
                 }
             } catch (IOException e) {
                 if (clientSession.isRunning()) {
-                    log.debug("读取用户Socket异常 sessionId={}", clientSession.getSessionId(), e);
+                    log.warn("读取用户Socket异常 sessionId={}", clientSession.getSessionId(), e);
                 }
             } finally {
                 disposeClientSession(clientSession, "用户连接关闭");
             }
-        });
+        }, "hppt-io-read-" + clientSession.getSessionId());
     }
 
     public void disposeClientSession(ClientSession clientSession, String type) {
@@ -154,6 +165,13 @@ public class ClientSessionManager implements AutoCloseable {
 
     public int getSessionNum() {
         return clientSessionMap.size();
+    }
+
+    public void disposeAllSessions(String type) {
+        List<ClientSession> sessions = new ArrayList<>(clientSessionMap.values());
+        for (ClientSession session : sessions) {
+            disposeClientSession(session, type);
+        }
     }
 
     @Override

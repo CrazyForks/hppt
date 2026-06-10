@@ -27,6 +27,7 @@ public class PostServerSessionService extends ServerSessionService<PostCtx> {
         log.info("*********");
         server = new NettyHttpServer(ssConfig.port, this, ssConfig);
         server.start();
+        startCtxCleanupThread(ssConfig);
     }
 
     protected final Map<String, PostCtx> ctxMap;
@@ -44,6 +45,29 @@ public class PostServerSessionService extends ServerSessionService<PostCtx> {
     @Override
     public void onExit() throws Exception {
         server.stop();
+    }
+
+    private void startCtxCleanupThread(SsConfig ssConfig) {
+        long heartbeatTimeout = ssConfig.heartbeatTimeout;
+        if (heartbeatTimeout <= 0) {
+            return;
+        }
+        long sleepMillis = Math.max(1000L, heartbeatTimeout / 2);
+        Thread.startVirtualThread(() -> {
+            while (running) {
+                try {
+                    Thread.sleep(sleepMillis);
+                } catch (InterruptedException ignored) {
+                }
+                long now = System.currentTimeMillis();
+                ctxMap.values().forEach(ctx -> {
+                    if (now - ctx.getLastRequestTime() > heartbeatTimeout) {
+                        log.info("post ctx stale, remove {}", ctx.cookie);
+                        removeCtx(ctx);
+                    }
+                });
+            }
+        });
     }
 
 

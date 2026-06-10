@@ -3,6 +3,11 @@ package org.wowtools.hppt.run.ss.common;
 import lombok.extern.slf4j.Slf4j;
 import org.wowtools.hppt.run.ss.pojo.SsConfig;
 
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * ServerSessionService抽象类
  * 注意，编写实现类时，不要在构造方法里做会阻塞的事情(比如起一个端口)，丢到init方法里做
@@ -19,19 +24,18 @@ public abstract class ServerSessionService<CTX> {
 
     protected volatile boolean running = true;
     private volatile boolean exited = false;
+    private volatile String lastExitReason = "running";
+    private volatile Thread syncThread;
+    private final AtomicLong lastReadyTime = new AtomicLong(-1L);
+    private final AtomicLong transportReconnectCount = new AtomicLong();
 
     /**
      * @param ssConfig 配置信息
      */
     public ServerSessionService(SsConfig ssConfig) {
         this.ssConfig = ssConfig;
-        if (null == ssConfig.relayScConfig) {
-            receiver = new PortReceiver<>(ssConfig, this);
-            log.info("--- 普通模式");
-        } else {
-            receiver = new SsReceiver<>(ssConfig.relayScConfig, this);
-            log.info("--- 中继模式");
-        }
+        receiver = new PortReceiver<>(ssConfig, this);
+        log.info("--- 普通模式");
     }
 
     /**
@@ -41,44 +45,66 @@ public abstract class ServerSessionService<CTX> {
      */
     public void syncStart(SsConfig ssConfig) {
         log.info("syncStart {}", this);
+        syncThread = Thread.currentThread();
         try {
-            init(ssConfig);
-        } catch (Exception e) {
-            log.warn("初始化失败 {}", this, e);
-            exit("init err");
-        }
-        //起一个线程，定期检查服务心跳
-        if (ssConfig.heartbeatTimeout > 0) {
-            Thread.startVirtualThread(() -> {
-                try {
-                    Thread.sleep(ssConfig.heartbeatTimeout);
-                } catch (InterruptedException ignored) {
-                }
-                while (running) {
-                    long lt = receiver.getLastHeartbeatTime();
-                    if (lt < 0 || System.currentTimeMillis() - lt < ssConfig.heartbeatTimeout * 1.5) {
-                        log.info("心跳检测正常");
-                        try {
-                            Thread.sleep(ssConfig.heartbeatTimeout);
-                        } catch (InterruptedException ignored) {
-                        }
-                    } else {
-                        log.warn("服务端心跳监测超时，执行重启");
-                        exit("服务端心跳监测失败");
-                        return;
-                    }
-                }
-            });
-        }
-        log.info("-------syncStart end {}", this);
-        while (running) {
             try {
-                Thread.sleep(10000);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
+                init(ssConfig);
+                markReady("service init");
+            } catch (Exception e) {
+                String reason = "init err:" + e.getMessage();
+                log.error("初始化失败，服务不可用 {}", this, e);
+                exit(reason);
+                throw new IllegalStateException(reason, e);
+            }
+            //起一个线程，定期检查服务心跳
+            if (ssConfig.heartbeatTimeout > 0) {
+                Thread.startVirtualThread(() -> {
+                    try {
+                        Thread.sleep(ssConfig.heartbeatTimeout);
+                    } catch (InterruptedException ignored) {
+                    }
+                    while (running) {
+                        if (!receiver.hasActiveClient()) {
+                            log.info("当前无活跃客户端，跳过心跳超时检查");
+                            try {
+                                Thread.sleep(ssConfig.heartbeatTimeout);
+                            } catch (InterruptedException ignored) {
+                            }
+                            continue;
+                        }
+                        long lt = receiver.getLastHeartbeatTime();
+                        if (lt < 0 || System.currentTimeMillis() - lt < ssConfig.heartbeatTimeout * 1.5) {
+                            log.info("心跳检测正常");
+                            try {
+                                Thread.sleep(ssConfig.heartbeatTimeout);
+                            } catch (InterruptedException ignored) {
+                            }
+                        } else {
+                            log.warn("服务端心跳监测超时，执行重启");
+                            exit("服务端心跳监测失败");
+                            return;
+                        }
+                    }
+                });
+            }
+            log.info("-------syncStart end {}", this);
+            while (running) {
+                try {
+                    Thread.sleep(10000);
+                } catch (InterruptedException e) {
+                    if (running) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException(e);
+                    }
+                    break;
+                }
+            }
+            exit("running stop");
+        } finally {
+            if (syncThread == Thread.currentThread()) {
+                syncThread = null;
             }
         }
-        exit("running stop");
     }
 
     /**
@@ -136,8 +162,13 @@ public abstract class ServerSessionService<CTX> {
             return;
         }
         exited = true;
+        lastExitReason = type;
         log.warn("ServerSessionService exit,type [{}] service {}", type, this);
         running = false;
+        Thread thread = syncThread;
+        if (thread != null && thread != Thread.currentThread()) {
+            thread.interrupt();
+        }
         receiver.exit();
         try {
             onExit();
@@ -163,5 +194,79 @@ public abstract class ServerSessionService<CTX> {
 
     public Receiver<CTX> getReceiver() {
         return receiver;
+    }
+
+    protected void markReady(String type) {
+        long now = System.currentTimeMillis();
+        lastReadyTime.set(now);
+        log.info("服务已就绪 type={} readyAt={}", type, formatTs(now));
+    }
+
+    protected void transportDisconnected(String reason) {
+        onTransportDisconnected(reason);
+    }
+
+    protected void recordTransportReconnect(String type, String reason, int attempt, long delayMillis) {
+        transportReconnectCount.incrementAndGet();
+        log.warn("传输层断开 type={} attempt={} nextDelay={}ms reason={}",
+                type, attempt, delayMillis, reason);
+    }
+
+    protected void onTransportDisconnected(String reason) {
+
+    }
+
+    protected void sleepForReconnect(long delayMillis) {
+        try {
+            Thread.sleep(delayMillis);
+        } catch (InterruptedException ignored) {
+        }
+    }
+
+    public String getLastExitReason() {
+        return lastExitReason;
+    }
+
+    public long getLastReadyTime() {
+        return lastReadyTime.get();
+    }
+
+    public long getTransportReconnectCount() {
+        return transportReconnectCount.get();
+    }
+
+    public boolean isRunning() {
+        return running;
+    }
+
+    public long getLastHeartbeatTime() {
+        return receiver.getLastHeartbeatTime();
+    }
+
+    public boolean hasActiveClient() {
+        return receiver.hasActiveClient();
+    }
+
+    public int getActiveClientCount() {
+        return receiver.getActiveClientCount();
+    }
+
+    public int getActiveSessionCount() {
+        return receiver.getActiveSessionCount();
+    }
+
+    public List<Map<String, Object>> snapshotClients() {
+        return receiver.snapshotClients();
+    }
+
+    public List<Map<String, Object>> snapshotSessions() {
+        return receiver.snapshotSessions();
+    }
+
+    private static String formatTs(long ts) {
+        if (ts <= 0) {
+            return "never";
+        }
+        return new Date(ts).toString();
     }
 }

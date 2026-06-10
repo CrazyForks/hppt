@@ -7,10 +7,12 @@ import org.wowtools.hppt.common.client.ClientSession;
  * @author liuyu
  * @date 2024/9/27
  */
-public sealed interface Receiver permits PortReceiver, SsReceiver {
+public sealed interface Receiver permits PortReceiver {
     void receiveServerBytes(byte[] bytes) throws Exception;
 
     void closeClientSession(ClientSession clientSession);
+
+    void transportDisconnected(String reason);
 
     void exit();
 

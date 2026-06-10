@@ -1,173 +1,356 @@
-## ✅ 服务端配置：ss.yml
+# 配置文件说明
 
-### 基础配置项
+本文档以当前代码中的配置类为准：
 
-| 配置项                  | 类型           | 默认值        | 是否必填 | 说明                                                                           |
-| -------------------- | ------------ | ---------- | ---- | ---------------------------------------------------------------------------- |
-| `type`               | String       | 无          | ✅    | 服务运行协议类型，支持：`post`、`websocket`、`hppt`、`rhppt`、`rpost`、`file` 或插件类全名（如 Kafka） |
-| `port`               | int          | 无          | ✅    | 服务端监听端口                                                                      |
-| `clients`            | List<Client> | 无          | ✅    | 允许连接的客户端账户列表，包含字段 `user` 和 `password`                                        |
-| `relayScConfig`      | ScConfig     | null       | ❌    | 中继模式下嵌套一个完整的客户端配置（可实现链式转发）                                                   |
-| `addonsPath`         | String       | `./addons` | ❌    | 插件目录路径                                                                       |
-| `heartbeatTimeout`   | long         | -1         | ❌    | 心跳超时时间(ms)，超过未收到心跳将强制重启连接                                                    |
-| `initSessionTimeout` | long         | 30000      | ❌    | 建立连接后与目标端口握手的最大超时(ms)                                                        |
-| `sessionTimeout`     | long         | 120000     | ❌    | 空闲会话超时(ms)，超时未确认将强制关闭连接                                                      |
-| `messageQueueSize`   | int          | 2048       | ❌    | 每个会话消息队列的最大长度，超出将强制断开                                                        |
-| `maxReturnBodySize`  | long         | 10MB       | ❌    | 每个请求最大返回数据体积（字节）                                                             |
-| `passwordRetryNum`   | int          | 5          | ❌    | 密码允许重试次数，超过后账号锁定直到重启                                                         |
-| `lifecycle`          | String       | null       | ❌    | 自定义生命周期实现类，允许实现初始化/销毁钩子                                                      |
+- 客户端：`run/src/main/java/org/wowtools/hppt/run/sc/pojo/ScConfig.java`
+- 服务端：`run/src/main/java/org/wowtools/hppt/run/ss/pojo/SsConfig.java`
+- 公共配置：`run/src/main/java/org/wowtools/hppt/common/util/CommonConfig.java`
 
-### 客户端认证配置
+说明：
+
+- 当前已移除 relay / 中继模式，文档中的配置均为普通模式
+- 未识别字段会被忽略，但建议尽量只保留本文档中的有效字段
+- `type` 既可以是内置类型，也可以是自定义插件类名
+
+## 公共配置
+
+客户端与服务端都支持：
+
+```yaml
+# 是否启用内容加密，默认 true
+enableEncrypt: true
+```
+
+## 客户端 sc.yml
+
+### 顶层字段
+
+```yaml
+# 内置类型：websocket / post / hppt / rhppt / rpost / file
+# 也可以填写自定义 ClientSessionService 实现类名
+type: post
+
+# 客户端用户名，每个 sc 进程应使用唯一 user
+clientUser: user1
+clientPassword: 12345
+
+# 插件目录，默认是程序根目录下的 addons
+addonsPath: ./addons
+
+# 客户端 netty workerGroup 线程数，默认 0，表示按 CPU 数动态计算
+workerGroupNum: 0
+
+# 默认绑定到本机哪个 IP；若为空则绑定到 0.0.0.0
+localHost: 127.0.0.1
+
+# 限制每次向服务端发送的最大包体，默认 10 MiB
+maxSendBodySize: 10485760
+
+# 生命周期实现类，全类名；为空则使用默认实现
+lifecycle: com.example.MyClientLifecycle
+
+# 心跳周期，毫秒；大于 0 时定期向服务端发心跳，默认 120000
+heartbeatPeriod: 120000
+
+# 接收服务端数据的内部队列大小，默认 2048
+receiveQueueSize: 2048
+
+# 整个 service 退出后的外层重启等待时间，默认 1000
+restartDelayMillis: 1000
+
+# 传输层断开后的首次重连等待时间，默认 1000
+transportReconnectBaseDelayMillis: 1000
+
+# 传输层断开后的最大重连等待时间，默认 15000
+transportReconnectMaxDelayMillis: 15000
+
+# 传输层重连等待抖动，默认 300
+transportReconnectJitterMillis: 300
+```
+
+### 端口映射
+
+```yaml
+forwards:
+  - localPort: 10022
+    remoteHost: 127.0.0.1
+    remotePort: 22
+
+    # 可选，覆盖顶层 localHost
+    localHost: 127.0.0.1
+```
+
+### `post`
+
+```yaml
+type: post
+post:
+  # 服务端 HTTP 地址，例如 http://host:20871 或 nginx 代理地址
+  serverUrl: http://example.com:20871
+
+  # 人为增加一个发送等待时间，单位毫秒，默认 5
+  sendSleepTime: 5
+```
+
+### `websocket`
+
+```yaml
+type: websocket
+websocket:
+  # 必须使用 ws:// 或 wss://
+  serverUrl: ws://example.com:20871
+
+  # 发送 websocket ping 的周期，毫秒；小于等于 0 则不发送，默认 30000
+  pingInterval: 30000
+
+  # 预留字段，默认 0
+  workerGroupNum: 0
+```
+
+### `hppt`
+
+```yaml
+type: hppt
+hppt:
+  host: 127.0.0.1
+  port: 20871
+
+  # 长度字段字节数，支持 1/2/3/4，默认 3
+  lengthFieldLength: 3
+
+  # 预留字段，默认 0
+  workerGroupNum: 0
+```
+
+### `rhppt`
+
+```yaml
+type: rhppt
+rhppt:
+  # 本机监听端口，等待服务端反向连接
+  port: 20871
+
+  # 长度字段字节数，支持 1/2/3/4，默认 3
+  lengthFieldLength: 3
+```
+
+### `rpost`
+
+```yaml
+type: rpost
+rpost:
+  # 本机监听 HTTP 端口，等待服务端通过 HTTP 反向访问
+  port: 20871
+
+  # 等待真实端口返回数据的毫秒数，默认 30000
+  waitResponseTime: 30000
+
+  # 回复前的人为延迟，默认 0
+  replyDelayTime: 0
+
+  # 预留字段
+  bossGroupNum: 1
+  workerGroupNum: 0
+```
+
+### `file`
+
+```yaml
+type: file
+file:
+  fileDir: /path/to/shared/dir
+```
+
+## 服务端 ss.yml
+
+### 顶层字段
+
+```yaml
+# 内置类型：websocket / post / hppt / rhppt / rpost / file
+# 也可以填写自定义 ServerSessionService 实现类名
+type: post
+
+# 插件目录，默认是程序根目录下的 addons
+addonsPath: ./addons
+
+# 服务端监听端口
+port: 20871
+
+# 服务端心跳超时，毫秒；小于等于 0 表示不启用
+heartbeatTimeout: -1
+
+# 新建真实连接时的超时时间，默认 30000
+initSessionTimeout: 30000
+
+# session 空闲检查周期相关超时，默认 300000
+sessionTimeout: 300000
+
+# 服务端缓存队列大小，默认 2048
+messageQueueSize: 2048
+
+# 每次向客户端返回的最大包体，默认 10 MiB
+maxReturnBodySize: 10485760
+
+# 生命周期实现类，全类名；为空则使用默认实现
+lifecycle: com.example.MyServerLifecycle
+
+# 密码最大尝试次数，默认 5
+passwordRetryNum: 5
+
+# 整个 service 退出后的外层重启等待时间，默认 1000
+restartDelayMillis: 1000
+
+# 传输层断开后的首次重连等待时间，默认 1000
+transportReconnectBaseDelayMillis: 1000
+
+# 传输层断开后的最大重连等待时间，默认 15000
+transportReconnectMaxDelayMillis: 15000
+
+# 传输层重连等待抖动，默认 300
+transportReconnectJitterMillis: 300
+```
+
+### 管理接口
+
+`ss` 可选开启本机 RESTful 管理接口。`management.port <= 0` 时关闭此特性；管理端口绑定失败会导致进程启动失败，避免进程存活但管理面不可用。
+
+详细接口说明见 [`management-api.md`](management-api.md)。
+
+```yaml
+management:
+  # <=0 表示关闭管理接口，默认 0
+  port: 0
+
+  # 默认仅监听本机
+  host: 127.0.0.1
+
+  # 可选 Bearer token；host 不是 localhost/127.0.0.1/::1 时必须配置
+  token: ""
+```
+
+启用示例：
+
+```yaml
+management:
+  host: 127.0.0.1
+  port: 19091
+  token: "change-me"
+```
+
+接口：
+
+- `GET /api/v1/health`：健康状态，`UP`/`DEGRADED` 返回 HTTP 200，`STARTING`/`DOWN` 返回 HTTP 503
+- `GET /api/v1/status`：进程、配置、当前 service、客户端与 session 明细
+- `GET /api/v1/sessions`：活跃目标 TCP session 列表
+- `GET /api/v1/clients`：已登录客户端列表
+- `POST /api/v1/restart`：重启当前业务 service，不退出 JVM；管理端口保持可用
+- `POST /api/v1/stop`：正常停止业务 service 并退出 `ss` 进程
+- `POST /api/v1/stop?force=true`：强制执行 `System.exit(0)`
+
+配置 `token` 后，请求需携带：
+
+```bash
+curl -H 'Authorization: Bearer change-me' http://127.0.0.1:19091/api/v1/health
+```
+
+### 允许的客户端
 
 ```yaml
 clients:
   - user: user1
-    password: 123456
-  - user: admin
-    password: admin123
+    password: 12345
+  - user: user2
+    password: 112233
 ```
 
----
+### `post`
 
-### 协议专用配置项（服务端）
+```yaml
+type: post
+post:
+  # 等待真实端口返回数据的毫秒数，默认 10000
+  waitResponseTime: 10000
 
-#### `post`
+  # 回复前的人为延迟，默认 0
+  replyDelayTime: 0
 
-| 配置项                | 类型   | 默认值   | 说明                 |
-| ------------------ | ---- | ----- | ------------------ |
-| `waitResponseTime` | long | 10000 | 等待真实端响应的最大时间(ms)   |
-| `replyDelayTime`   | long | 0     | 延迟回复时间(ms)，用于调试等场景 |
-| `bossGroupNum`     | int  | 1     | Netty boss 线程池大小   |
-| `workerGroupNum`   | int  | 0     | Netty worker 线程池大小 |
+  # 预留字段
+  bossGroupNum: 1
+  workerGroupNum: 0
+```
 
-#### `websocket`
+### `websocket`
 
-| 配置项              | 类型  | 默认值 | 说明                 |
-| ---------------- | --- | --- | ------------------ |
-| `bossGroupNum`   | int | 1   | Netty boss 线程池大小   |
-| `workerGroupNum` | int | 0   | Netty worker 线程池大小 |
+```yaml
+type: websocket
+websocket:
+  # 预留字段
+  bossGroupNum: 1
+  workerGroupNum: 0
+```
 
-#### `hppt`
+### `hppt`
 
-| 配置项                 | 类型  | 默认值 | 说明                 |
-| ------------------- | --- | --- | ------------------ |
-| `lengthFieldLength` | int | 3   | 包头长度字段使用的字节数（1-4）  |
-| `bossGroupNum`      | int | 1   | Netty boss 线程池大小   |
-| `workerGroupNum`    | int | 0   | Netty worker 线程池大小 |
+```yaml
+type: hppt
+hppt:
+  # 长度字段字节数，支持 1/2/3/4，默认 3
+  lengthFieldLength: 3
 
-#### `rhppt`
+  # 预留字段
+  bossGroupNum: 1
+  workerGroupNum: 0
+```
 
-| 配置项                 | 类型     | 默认值 | 说明          |
-| ------------------- | ------ | --- | ----------- |
-| `host`              | String | 无   | 客户端可访问的服务地址 |
-| `port`              | int    | 无   | 客户端连接端口     |
-| `lengthFieldLength` | int    | 3   | 包长度字段所占字节数  |
+### `rhppt`
 
-#### `rpost`
+```yaml
+type: rhppt
+rhppt:
+  # 指向客户端监听端
+  host: 127.0.0.1
+  port: 20871
 
-| 配置项         | 类型     | 默认值 | 说明                          |
-| ----------- | ------ | --- | --------------------------- |
-| `serverUrl` | String | 无   | 客户端启动的 HTTP 服务地址（如反向代理 URL） |
+  # 长度字段字节数，支持 1/2/3/4，默认 3
+  lengthFieldLength: 3
+```
 
-#### `file` 尚不成熟
+### `rpost`
 
-| 配置项       | 类型     | 默认值 | 说明       |
-| --------- | ------ | --- | -------- |
-| `fileDir` | String | 无   | 文件传输共享目录 |
+```yaml
+type: rpost
+rpost:
+  # 指向客户端监听的 HTTP 地址
+  serverUrl: http://example.com:20871
+```
 
----
+### `file`
 
-## ✅ 客户端配置：sc.yml
+```yaml
+type: file
+file:
+  fileDir: /path/to/shared/dir
+```
 
-### 基础配置项
+## 关于重启与重连
 
-| 配置项               | 类型            | 默认值         | 是否必填 | 说明                 |
-| ----------------- | ------------- | ----------- | ---- | ------------------ |
-| `type`            | String        | 无           | ✅    | 协议类型，需与服务端一致       |
-| `clientUser`      | String        | 无           | ✅    | 客户端用户名，服务端校验用      |
-| `clientPassword`  | String        | 无           | ✅    | 客户端密码              |
-| `forwards`        | List<Forward> | 无           | ✅    | 本地端口转发规则列表         |
-| `localHost`       | String        | `127.0.0.1` | ❌    | 本地监听 IP 地址         |
-| `workerGroupNum`  | int           | 0 (CPU核数)   | ❌    | Netty worker 线程数   |
-| `maxSendBodySize` | int           | 10MB        | ❌    | 单次发送最大包体大小         |
-| `heartbeatPeriod` | long          | 120000      | ❌    | 心跳间隔(ms)，设置为 0 可关闭 |
-| `isRelay`         | boolean       | false       | ❌    | 是否启用中继转发模式         |
-| `addonsPath`      | String        | `./addons`  | ❌    | 插件目录路径             |
-| `lifecycle`       | String        | null        | ❌    | 自定义生命周期实现类         |
+推荐区分两个概念：
 
-### 转发规则配置（Forward）
+- `restartDelayMillis`
+  - 整个 service 已经退出，由外层重新拉起时等待多久
+- `transportReconnect*`
+  - service 还活着，只是传输层断开时的局部重连退避
 
-| 字段           | 类型     | 说明         |
-| ------------ | ------ | ---------- |
-| `localHost`  | String | 本地监听 IP    |
-| `localPort`  | int    | 本地监听端口     |
-| `remoteHost` | String | 服务端访问的目标地址 |
-| `remotePort` | int    | 服务端访问的目标端口 |
+例如：
 
----
+```yaml
+restartDelayMillis: 1000
+transportReconnectBaseDelayMillis: 1000
+transportReconnectMaxDelayMillis: 60000
+transportReconnectJitterMillis: 500
+```
 
-### 协议专用配置项（客户端）
+这表示：
 
-#### `post`
-
-| 配置项             | 类型     | 默认值 | 说明              |
-| --------------- | ------ | --- | --------------- |
-| `serverUrl`     | String | 无   | 服务端 HTTP 接口 URL |
-| `sendSleepTime` | long   | 5   | 每次请求后的等待间隔(ms)  |
-
-#### `websocket`
-
-| 配置项              | 类型     | 默认值   | 说明           |
-| ---------------- | ------ | ----- | ------------ |
-| `serverUrl`      | String | 无     | WebSocket 地址 |
-| `pingInterval`   | long   | 30000 | 发送 ping 间隔   |
-| `workerGroupNum` | int    | 0     | worker线程数    |
-
-#### `hppt`
-
-| 配置项                 | 类型     | 默认值 | 说明        |
-| ------------------- | ------ | --- | --------- |
-| `host`              | String | 无   | 服务端地址     |
-| `port`              | int    | 无   | 服务端端口     |
-| `lengthFieldLength` | int    | 3   | 包长字段所占字节数 |
-| `workerGroupNum`    | int    | 0   | Netty线程数  |
-
-#### `rhppt`
-
-| 配置项                 | 类型  | 默认值 | 说明          |
-| ------------------- | --- | --- | ----------- |
-| `port`              | int | 无   | 本地反向服务端口    |
-| `lengthFieldLength` | int | 3   | 包头长度字段所占字节数 |
-
-#### `rpost`
-
-| 配置项              | 类型  | 默认值 | 说明           |
-| ---------------- | --- | --- | ------------ |
-| `port`           | int | 无   | 启动 HTTP 服务端口 |
-| `bossGroupNum`   | int | 1   | Boss 线程池大小   |
-| `workerGroupNum` | int | 0   | Worker 线程池大小 |
-
-#### `file`
-
-| 配置项             | 类型     | 默认值 | 说明             |
-| --------------- | ------ | --- | -------------- |
-| `sendDir`       | String | 无   | 本地发送文件目录       |
-| `receiveDir`    | String | 无   | 本地接收文件目录       |
-| `sendSleepTime` | long   | 200 | 每次文件片段发送间隔(ms) |
-
----
-
-## 🚀 高级功能说明
-
-### 中继模式 尚不成熟
-
-* `ss.yml` 中配置 `relayScConfig` 字段，即可将当前服务端作为客户端连接下一个服务端，实现链式转发。
-
-### 插件系统
-
-* 通过配置 `addonsPath` 可加载插件（如 Kafka、Redis 等），插件需打包为 `.jar` 放入此目录。
-
-### 生命周期钩子
-
-* 可在 `ss.yml` 和 `sc.yml` 中通过 `lifecycle` 配置类路径，实现初始化与销毁逻辑，适合接入监控、日志等框架。
-
+- service 真退出时，1 秒后由外层重新启动
+- transport 断开时按 1s、2s、4s... 的指数退避重试，直到上限 60s
